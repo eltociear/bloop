@@ -3,7 +3,6 @@ use std::{collections::HashMap, ops::Not, path::Path, sync::Arc};
 use crate::{query::parser::NLQuery, Configuration};
 
 use anyhow::Result;
-use maplit::hashmap;
 use ndarray::Axis;
 use ort::{
     tensor::{FromArray, InputTensor, OrtOwnedTensor},
@@ -29,6 +28,7 @@ const COLLECTION_NAME: &str = "documents";
 pub struct Semantic {
     qdrant: Arc<QdrantClient>,
     tokenizer: Arc<tokenizers::Tokenizer>,
+    gpt2_tokenizer: Arc<tokenizers::Tokenizer>,
     session: Arc<ort::Session>,
     config: Arc<Configuration>,
 }
@@ -84,6 +84,9 @@ impl Semantic {
             qdrant: qdrant.into(),
             tokenizer: tokenizers::Tokenizer::from_file(model_dir.join("tokenizer.json"))
                 .unwrap()
+                .into(),
+            gpt2_tokenizer: tokenizers::Tokenizer::from_file(model_dir.join("gpt-2").join("tokenizer.json"))
+                .expect("unable to open gpt2-tokenizer, try `git lfs pull` and pass `--model-dir bloop/model` at the CLI")
                 .into(),
             session: SessionBuilder::new(&environment)?
                 .with_optimization_level(GraphOptimizationLevel::Level3)?
@@ -216,17 +219,23 @@ impl Semantic {
                     Ok(ok) => Some(PointStruct {
                         id: Some(PointId::from(uuid::Uuid::new_v4().to_string())),
                         vectors: Some(ok.into()),
-                        payload: hashmap! {
-                            "lang".into() => lang_str.to_ascii_lowercase().into(),
-                            "repo_name".into() => repo_name.into(),
-                            "repo_ref".into() => repo_ref.into(),
-                            "relative_path".into() => relative_path.into(),
-                            "snippet".into() => chunk.data.into(),
-                            "start_line".into() => chunk.range.start.line.to_string().into(),
-                            "end_line".into() => chunk.range.end.line.to_string().into(),
-                            "start_byte".into() => chunk.range.start.byte.to_string().into(),
-                            "end_byte".into() => chunk.range.end.byte.to_string().into(),
-                        },
+                        payload: HashMap::from([
+                            ("lang".into(), lang_str.to_ascii_lowercase().into()),
+                            ("repo_name".into(), repo_name.into()),
+                            ("repo_ref".into(), repo_ref.into()),
+                            ("relative_path".into(), relative_path.into()),
+                            ("snippet".into(), chunk.data.into()),
+                            (
+                                "start_line".into(),
+                                chunk.range.start.line.to_string().into(),
+                            ),
+                            ("end_line".into(), chunk.range.end.line.to_string().into()),
+                            (
+                                "start_byte".into(),
+                                chunk.range.start.byte.to_string().into(),
+                            ),
+                            ("end_byte".into(), chunk.range.end.byte.to_string().into()),
+                        ]),
                     }),
                     Err(err) => {
                         trace!(?err, "embedding failed");
@@ -243,5 +252,12 @@ impl Semantic {
                 debug!("successful upsert");
             }
         }
+    }
+
+    pub fn gpt2_token_count(&self, input: &str) -> usize {
+        self.gpt2_tokenizer
+            .encode(input, false)
+            .map(|code| code.len())
+            .unwrap_or(0)
     }
 }
