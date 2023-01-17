@@ -195,7 +195,7 @@ impl Semantic {
             repo_name,
             relative_path,
             buffer,
-            &self.tokenizer,
+            &self.gpt2_tokenizer,
             self.config.embedding_input_size,
             15,
             self.config

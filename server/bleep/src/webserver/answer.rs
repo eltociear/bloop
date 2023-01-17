@@ -67,6 +67,8 @@ pub struct AnswerResponse {
     pub selection: api::Response,
 }
 
+const SNIPPET_COUNT: usize = 15;
+
 pub async fn handle(
     Query(params): Query<Params>,
     Extension(app): Extension<Application>,
@@ -79,7 +81,7 @@ pub async fn handle(
 
     let mut snippets_by_file = app
         .semantic
-        .search(&query, 20)
+        .search(&query, 4 * SNIPPET_COUNT as u64) // heuristic
         .await
         .map_err(|e| super::error(ErrorKind::Internal, e.to_string()))?
         .into_iter()
@@ -184,7 +186,7 @@ pub async fn handle(
         .collect::<Vec<_>>();
 
     snippets.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap());
-    snippets = snippets.into_iter().take(params.limit as usize).collect();
+    snippets = snippets.into_iter().take(SNIPPET_COUNT).collect();
 
     if snippets.is_empty() {
         super::error(ErrorKind::Internal, "semantic search returned no snippets");
@@ -391,6 +393,9 @@ impl<'a> AnswerAPIClient<'a> {
             snippets.len(),
             self.query,
         );
+
+        let tokens_used = self.semantic.gpt2_token_count(&prompt);
+        tracing::debug!(%tokens_used, "select prompt token count");
         prompt
     }
 
