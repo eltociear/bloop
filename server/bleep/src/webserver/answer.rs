@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use axum::{extract::Query, response::IntoResponse, Extension, Json};
 use reqwest::StatusCode;
 use tracing::{error, info};
@@ -73,7 +75,8 @@ pub async fn handle(
     let target = query
         .target()
         .ok_or_else(|| super::error(ErrorKind::User, "missing search target".to_owned()))?;
-    let mut snippets = app
+
+    let mut snippets_by_file = app
         .semantic
         .search(&query, params.limit)
         .await
@@ -89,26 +92,78 @@ pub async fn handle(
                 }
             }
 
-            api::Snippet {
-                lang: value_to_string(s.remove("lang").unwrap()),
-                repo_name: value_to_string(s.remove("repo_name").unwrap()),
-                repo_ref: value_to_string(s.remove("repo_ref").unwrap()),
-                relative_path: value_to_string(s.remove("relative_path").unwrap()),
-                text: value_to_string(s.remove("snippet").unwrap()),
-                start_line: value_to_string(s.remove("start_line").unwrap())
-                    .parse::<usize>()
-                    .unwrap(),
-                end_line: value_to_string(s.remove("end_line").unwrap())
-                    .parse::<usize>()
-                    .unwrap(),
-                start_byte: value_to_string(s.remove("start_byte").unwrap())
-                    .parse::<usize>()
-                    .unwrap(),
-                end_byte: value_to_string(s.remove("end_byte").unwrap())
-                    .parse::<usize>()
-                    .unwrap(),
-            }
+            let relative_path = value_to_string(s.remove("relative_path").unwrap());
+
+            (
+                relative_path.clone(),
+                api::Snippet {
+                    lang: value_to_string(s.remove("lang").unwrap()),
+                    repo_name: value_to_string(s.remove("repo_name").unwrap()),
+                    repo_ref: value_to_string(s.remove("repo_ref").unwrap()),
+                    relative_path,
+                    text: value_to_string(s.remove("snippet").unwrap()),
+                    start_line: value_to_string(s.remove("start_line").unwrap())
+                        .parse::<usize>()
+                        .unwrap(),
+                    end_line: value_to_string(s.remove("end_line").unwrap())
+                        .parse::<usize>()
+                        .unwrap(),
+                    start_byte: value_to_string(s.remove("start_byte").unwrap())
+                        .parse::<usize>()
+                        .unwrap(),
+                    end_byte: value_to_string(s.remove("end_byte").unwrap())
+                        .parse::<usize>()
+                        .unwrap(),
+                },
+            )
         })
+        .fold(HashMap::new(), |mut map, (path, snippet)| {
+            map.entry(path)
+                .and_modify(|v: &mut Vec<_>| v.push(snippet.clone()))
+                .or_insert_with(|| vec![snippet]);
+            map
+        });
+
+    // remove overlapping snippets in each file
+    for (k, s) in snippets_by_file.iter_mut().filter(|(_, s)| !s.is_empty()) {
+        // sort by ending point of each snippet
+        s.sort_by(|a, b| a.end_line.cmp(&b.end_line));
+
+        // greedily select snippets that do not overlap
+        // the first element is always selected
+        let mut selected_indices = vec![0usize];
+        let mut rejected_indices = vec![];
+
+        for next_idx in 1..s.len() {
+            let previous_idx = *selected_indices.last().unwrap();
+
+            let previous_item = &s[previous_idx];
+            let next_item = &s[next_idx];
+
+            // does the new item overlap with the previously selected item?
+            if next_item.start_line <= previous_item.end_line {
+                // there is an overlap, reject this item
+                rejected_indices.push(next_idx);
+            } else {
+                // no overlap, select this snippet
+                selected_indices.push(next_idx);
+            }
+        }
+
+        tracing::debug!("{} - {} overlapping snippets", k, rejected_indices.len());
+        // remove in reverse order of appearance to avoid shifting of indices
+        rejected_indices.reverse();
+        for idx in rejected_indices {
+            s.remove(idx);
+        }
+    }
+
+    // limit the number of snippets per file to 2
+    let mut snippets = snippets_by_file
+        .into_iter()
+        .inspect(|(k, v)| tracing::debug!("{} - {} total snippets after de-overlap", k, v.len()))
+        .map(|(_, v)| v.into_iter().take(2))
+        .flatten()
         .collect::<Vec<_>>();
 
     if snippets.is_empty() {
