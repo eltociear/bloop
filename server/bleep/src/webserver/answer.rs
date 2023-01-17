@@ -380,7 +380,7 @@ impl<'a> AnswerAPIClient<'a> {
         // the example question/answer pair helps reinforce that we want exactly a single
         // number in the output, with no spaces or punctuation such as fullstops.
         prompt += &format!(
-            "\nAbove are {} code snippets separated by \"{DELIMITER}\". \
+            "Above are {} code snippets separated by \"{DELIMITER}\". \
 Your job is to select the snippet that best answers the question. Reply\
 with a single number indicating the index of the snippet in the list.\
 If none of the snippets seem relevant, reply with \"0\".
