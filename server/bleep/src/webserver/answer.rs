@@ -158,11 +158,13 @@ pub async fn handle(
         }
     }
 
-    // limit the number of snippets per file to 2
+    // limit the number of snippets per file to atmost 20% of the total results
+    let per_file_limit = crate::div_ceil(params.limit as usize, 5);
+    tracing::debug!(%per_file_limit, "setting per-file limit");
     let mut snippets = snippets_by_file
         .into_iter()
         .inspect(|(k, v)| tracing::debug!("{} - {} total snippets after de-overlap", k, v.len()))
-        .flat_map(|(_, v)| v.into_iter().take(2))
+        .flat_map(|(_, v)| v.into_iter().take(per_file_limit))
         .collect::<Vec<_>>();
 
     if snippets.is_empty() {
