@@ -13,7 +13,7 @@ use qdrant_client::{
     qdrant::{
         r#match::MatchValue, vectors_config, with_payload_selector::SelectorOptions,
         CollectionOperationResponse, CreateCollection, Distance, FieldCondition, Filter, Match,
-        PointId, PointStruct, SearchPoints, Value, VectorParams, VectorsConfig,
+        PointId, PointStruct, ScoredPoint, SearchPoints, VectorParams, VectorsConfig,
         WithPayloadSelector,
     },
 };
@@ -97,11 +97,8 @@ impl Semantic {
         })
     }
 
-    pub fn embed(&self, chunk: &str, prefix: &str) -> Result<Vec<f32>> {
-        let mut sequence = prefix.to_owned();
-        sequence.push_str(chunk);
-
-        let tokenizer_output = self.tokenizer.encode(sequence, true).unwrap();
+    pub fn embed(&self, chunk: &str) -> Result<Vec<f32>> {
+        let tokenizer_output = self.tokenizer.encode(chunk, true).unwrap();
 
         let input_ids = tokenizer_output.get_ids();
         let attention_mask = tokenizer_output.get_attention_mask();
@@ -136,11 +133,7 @@ impl Semantic {
         Ok(pooled.to_owned().as_slice().unwrap().to_vec())
     }
 
-    pub async fn search<'a>(
-        &self,
-        nl_query: &NLQuery<'a>,
-        limit: u64,
-    ) -> Result<Vec<HashMap<String, Value>>> {
+    pub async fn search<'a>(&self, nl_query: &NLQuery<'a>, limit: u64) -> Result<Vec<ScoredPoint>> {
         let Some(query) = nl_query.target() else {
             anyhow::bail!("no search target for query");
         };
@@ -174,7 +167,7 @@ impl Semantic {
             .search_points(&SearchPoints {
                 collection_name: COLLECTION_NAME.to_string(),
                 limit,
-                vector: self.embed(query, "query: ")?,
+                vector: self.embed(query)?,
                 with_payload: Some(WithPayloadSelector {
                     selector_options: Some(SelectorOptions::Enable(true)),
                 }),
@@ -186,7 +179,7 @@ impl Semantic {
             })
             .await?;
 
-        Ok(response.result.into_iter().map(|pt| pt.payload).collect())
+        Ok(response.result)
     }
 
     #[tracing::instrument(skip(self, repo_ref, relative_path, buffer))]
@@ -202,7 +195,7 @@ impl Semantic {
             repo_name,
             relative_path,
             buffer,
-            &self.tokenizer,
+            &self.gpt2_tokenizer,
             self.config.embedding_input_size,
             15,
             self.config
@@ -214,8 +207,8 @@ impl Semantic {
         let datapoints = chunks
             .par_iter()
             .filter(|chunk| chunk.len() > 50) // small chunks tend to skew results
-            .filter_map(|chunk| {
-                match self.embed(&(repo_plus_file.clone() + chunk.data), "passage: ") {
+            .filter_map(
+                |chunk| match self.embed(&(repo_plus_file.clone() + chunk.data)) {
                     Ok(ok) => Some(PointStruct {
                         id: Some(PointId::from(uuid::Uuid::new_v4().to_string())),
                         vectors: Some(ok.into()),
@@ -241,8 +234,8 @@ impl Semantic {
                         trace!(?err, "embedding failed");
                         None
                     }
-                }
-            })
+                },
+            )
             .collect::<Vec<_>>();
 
         if !datapoints.is_empty() {

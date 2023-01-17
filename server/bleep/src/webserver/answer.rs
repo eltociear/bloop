@@ -1,17 +1,19 @@
+use std::collections::HashMap;
+
 use axum::{extract::Query, response::IntoResponse, Extension, Json};
 use reqwest::StatusCode;
 use tracing::{error, info};
 use utoipa::ToSchema;
 
 use crate::{
-    indexes::reader::ContentDocument, query::parser, semantic::Semantic, state::RepoRef,
-    Application,
+    indexes::reader::ContentDocument, query::parser, segment::QueryEvent, semantic::Semantic,
+    state::RepoRef, Application,
 };
 
 use super::ErrorKind;
 
 /// Mirrored from `answer_api/lib.rs` to avoid private dependency.
-mod api {
+pub mod api {
     #[derive(Debug, serde::Serialize, serde::Deserialize)]
     pub struct Request {
         pub query: String,
@@ -30,6 +32,7 @@ mod api {
         pub end_line: usize,
         pub start_byte: usize,
         pub end_byte: usize,
+        pub score: f32,
     }
 
     #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -64,6 +67,8 @@ pub struct AnswerResponse {
     pub selection: api::Response,
 }
 
+const SNIPPET_COUNT: usize = 15;
+
 pub async fn handle(
     Query(params): Query<Params>,
     Extension(app): Extension<Application>,
@@ -73,13 +78,14 @@ pub async fn handle(
     let target = query
         .target()
         .ok_or_else(|| super::error(ErrorKind::User, "missing search target".to_owned()))?;
-    let mut snippets = app
+
+    let mut snippets_by_file = app
         .semantic
-        .search(&query, params.limit)
+        .search(&query, 4 * SNIPPET_COUNT as u64) // heuristic
         .await
         .map_err(|e| super::error(ErrorKind::Internal, e.to_string()))?
         .into_iter()
-        .map(|mut s| {
+        .map(|result| {
             use qdrant_client::qdrant::{value::Kind, Value};
 
             fn value_to_string(value: Value) -> String {
@@ -89,27 +95,98 @@ pub async fn handle(
                 }
             }
 
-            api::Snippet {
-                lang: value_to_string(s.remove("lang").unwrap()),
-                repo_name: value_to_string(s.remove("repo_name").unwrap()),
-                repo_ref: value_to_string(s.remove("repo_ref").unwrap()),
-                relative_path: value_to_string(s.remove("relative_path").unwrap()),
-                text: value_to_string(s.remove("snippet").unwrap()),
-                start_line: value_to_string(s.remove("start_line").unwrap())
-                    .parse::<usize>()
-                    .unwrap(),
-                end_line: value_to_string(s.remove("end_line").unwrap())
-                    .parse::<usize>()
-                    .unwrap(),
-                start_byte: value_to_string(s.remove("start_byte").unwrap())
-                    .parse::<usize>()
-                    .unwrap(),
-                end_byte: value_to_string(s.remove("end_byte").unwrap())
-                    .parse::<usize>()
-                    .unwrap(),
-            }
+            let mut s = result.payload;
+
+            let lang = value_to_string(s.remove("lang").unwrap());
+            let repo_name = value_to_string(s.remove("repo_name").unwrap());
+            let repo_ref = value_to_string(s.remove("repo_ref").unwrap());
+            let relative_path = value_to_string(s.remove("relative_path").unwrap());
+            let text = value_to_string(s.remove("snippet").unwrap());
+            let score = result.score;
+            let start_line = value_to_string(s.remove("start_line").unwrap())
+                .parse::<usize>()
+                .unwrap();
+            let end_line = value_to_string(s.remove("end_line").unwrap())
+                .parse::<usize>()
+                .unwrap();
+            let start_byte = value_to_string(s.remove("start_byte").unwrap())
+                .parse::<usize>()
+                .unwrap();
+            let end_byte = value_to_string(s.remove("end_byte").unwrap())
+                .parse::<usize>()
+                .unwrap();
+
+            (
+                relative_path.clone(),
+                api::Snippet {
+                    lang,
+                    repo_name,
+                    repo_ref,
+                    relative_path,
+                    text,
+                    start_line,
+                    end_line,
+                    start_byte,
+                    end_byte,
+                    score,
+                },
+            )
         })
+        .fold(HashMap::new(), |mut map, (path, snippet)| {
+            map.entry(path)
+                .and_modify(|v: &mut Vec<_>| v.push(snippet.clone()))
+                .or_insert_with(|| vec![snippet]);
+            map
+        });
+
+    // remove overlapping snippets in each file
+    for (k, s) in snippets_by_file.iter_mut().filter(|(_, s)| !s.is_empty()) {
+        // sort by ending point of each snippet
+        s.sort_by(|a, b| a.end_line.cmp(&b.end_line));
+
+        // greedily select snippets that do not overlap
+        // the first element is always selected
+        let mut selected_indices = vec![0usize];
+        let mut rejected_indices = vec![];
+
+        for next_idx in 1..s.len() {
+            let previous_idx = *selected_indices.last().unwrap();
+
+            let previous_item = &s[previous_idx];
+            let next_item = &s[next_idx];
+
+            // does the new item overlap with the previously selected item?
+            if next_item.start_line <= previous_item.end_line {
+                // there is an overlap, reject this item
+                rejected_indices.push(next_idx);
+            } else {
+                // no overlap, select this snippet
+                selected_indices.push(next_idx);
+            }
+        }
+
+        tracing::debug!("{} - {} overlapping snippets", k, rejected_indices.len());
+        // remove in reverse order of appearance to avoid shifting of indices
+        rejected_indices.reverse();
+        for idx in rejected_indices {
+            s.remove(idx);
+        }
+
+        s.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap());
+    }
+
+    // limit the number of snippets per file to atmost 20% of the total results
+    let per_file_limit = crate::div_ceil(4 * SNIPPET_COUNT, 5);
+    tracing::debug!(%per_file_limit, "setting per-file limit");
+    let mut snippets = snippets_by_file
+        .into_iter()
+        .inspect(|(k, v)| tracing::debug!("{} - {} total snippets after de-overlap", k, v.len()))
+        .flat_map(|(_, v)| v.into_iter().take(per_file_limit))
+        //.flat_map(|(_, v)| v.into_iter())
         .collect::<Vec<_>>();
+
+    snippets.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap());
+    snippets = snippets.into_iter().take(SNIPPET_COUNT).collect();
 
     if snippets.is_empty() {
         super::error(ErrorKind::Internal, "semantic search returned no snippets");
@@ -120,8 +197,9 @@ pub async fn handle(
         .semantic
         .build_answer_api_client(answer_api_host.as_str(), target);
 
+    let select_prompt = answer_api_client.build_select_prompt(&snippets);
     let relevant_snippet_index = answer_api_client
-        .select_snippet(&snippets)
+        .select_snippet(&select_prompt)
         .await
         .map_err(|e| match e.status() {
             Some(StatusCode::SERVICE_UNAVAILABLE) => super::error(
@@ -137,7 +215,9 @@ pub async fn handle(
         .parse::<usize>()
         .map_err(super::internal_error)?;
 
-    let relevant_snippet = &snippets[relevant_snippet_index];
+    let relevant_snippet = snippets
+        .get(relevant_snippet_index)
+        .ok_or_else(|| super::internal_error("answer-api returned out-of-bounds index"))?;
     // grow the snippet by 60 lines above and below, we have sufficient space
     // to grow this snippet by 10 times its original size (15 to 150)
     let processed_snippet = {
@@ -173,11 +253,13 @@ pub async fn handle(
             end_line: relevant_snippet.end_line,
             start_byte: relevant_snippet.start_byte,
             end_byte: relevant_snippet.end_byte,
+            score: relevant_snippet.score,
         }
     };
 
-    let snippet_explaination = answer_api_client
-        .explain_snippet(&processed_snippet)
+    let explain_prompt = answer_api_client.build_explain_prompt(&processed_snippet);
+    let snippet_explanation = answer_api_client
+        .explain_snippet(&explain_prompt)
         .await
         .map_err(|e| match e.status() {
             Some(StatusCode::SERVICE_UNAVAILABLE) => super::error(
@@ -195,12 +277,14 @@ pub async fn handle(
 
     if let Some(ref segment) = *app.segment {
         segment
-            .track_query(
-                &params.user_id,
-                &params.q,
-                &snippets[0].text,
-                &snippet_explaination,
-            )
+            .track_query(QueryEvent {
+                user_id: params.user_id.clone(),
+                query: params.q.clone(),
+                select_prompt,
+                relevant_snippet_index,
+                explain_prompt,
+                explanation: snippet_explanation.clone(),
+            })
             .await;
     }
 
@@ -209,7 +293,7 @@ pub async fn handle(
         selection: api::Response {
             data: api::DecodedResponse {
                 index: 0u32, // the relevant snippet is always placed at 0
-                answer: snippet_explaination,
+                answer: snippet_explanation,
             },
             id: params.user_id,
         },
@@ -265,13 +349,13 @@ impl Semantic {
 impl<'s> AnswerAPIClient<'s> {
     async fn send(
         &self,
-        prompt: String,
+        prompt: &str,
         max_tokens: u32,
     ) -> Result<reqwest::Response, reqwest::Error> {
         self.client
             .post(self.host.as_str())
             .json(&OpenAIRequest {
-                prompt: prompt.clone(),
+                prompt: prompt.to_string(),
                 max_tokens,
             })
             .send()
@@ -281,10 +365,7 @@ impl<'s> AnswerAPIClient<'s> {
 
 const DELIMITER: &str = "######";
 impl<'a> AnswerAPIClient<'a> {
-    async fn select_snippet(
-        &self,
-        snippets: &[api::Snippet],
-    ) -> Result<reqwest::Response, reqwest::Error> {
+    fn build_select_prompt(&self, snippets: &[api::Snippet]) -> String {
         let mut prompt = snippets
             .iter()
             .enumerate()
@@ -299,45 +380,52 @@ impl<'a> AnswerAPIClient<'a> {
         // the example question/answer pair helps reinforce that we want exactly a single
         // number in the output, with no spaces or punctuation such as fullstops.
         prompt += &format!(
-            "\nAbove are {} code snippets separated by \"{DELIMITER}\". \
-            Your job is to select the snippet that best answers the question. Reply\
-            with a single number indicating the index of the snippet in the list.\
-            If none of the snippets seem relevant, reply with \"0\".
+            "Above are {} code snippets separated by \"{DELIMITER}\". \
+Your job is to select the snippet that best answers the question. Reply\
+with a single number indicating the index of the snippet in the list.\
+If none of the snippets seem relevant, reply with \"0\".
 
-            Q:What icon do we use to clear search history?
-            A:3
+Q:What icon do we use to clear search history?
+A:3
 
-            Q:{}
-            A:",
+Q:{}
+A:",
             snippets.len(),
             self.query,
         );
+
+        let tokens_used = self.semantic.gpt2_token_count(&prompt);
+        tracing::debug!(%tokens_used, "select prompt token count");
+        prompt
+    }
+
+    fn build_explain_prompt(&self, snippet: &api::Snippet) -> String {
+        let prompt = format!(
+            "File: {}
+
+{}
+
+#####
+
+Above is a code snippet. \
+Answer the user's question with a detailed response. \
+Separate each function out and explain why it is relevant. \
+Format your response in GitHub markdown with code blocks annotated\
+with programming language. Include the path of the file.
+
+Q:{}
+A:",
+            snippet.relative_path, snippet.text, self.query
+        );
+        prompt
+    }
+
+    async fn select_snippet(&self, prompt: &str) -> Result<reqwest::Response, reqwest::Error> {
         self.send(prompt, 1).await
     }
 
-    async fn explain_snippet(
-        &self,
-        snippet: &api::Snippet,
-    ) -> Result<reqwest::Response, reqwest::Error> {
-        let prompt = format!(
-            "
-            File: {}
-
-            {}
-
-            #####
-
-            Above is a code snippet.\
-            Answer the user's question with a detailed response.\
-            Separate each function out and explain why it is relevant.\
-            Format your response in GitHub markdown with code blocks annotated\
-            with programming language. Include the path of the file.
-
-            Q:{}
-            A:",
-            snippet.relative_path, snippet.text, self.query
-        );
-        let tokens_used = self.semantic.gpt2_token_count(&prompt);
+    async fn explain_snippet(&self, prompt: &str) -> Result<reqwest::Response, reqwest::Error> {
+        let tokens_used = self.semantic.gpt2_token_count(prompt);
         info!(%tokens_used, "input prompt token count");
         let max_tokens = 4096usize.saturating_sub(tokens_used);
         if max_tokens == 0 {
