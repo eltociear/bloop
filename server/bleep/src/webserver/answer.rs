@@ -67,7 +67,7 @@ pub struct AnswerResponse {
     pub selection: api::Response,
 }
 
-const SNIPPET_COUNT: usize = 15;
+const SNIPPET_COUNT: usize = 14;
 
 pub async fn handle(
     Query(params): Query<Params>,
@@ -79,13 +79,13 @@ pub async fn handle(
         .target()
         .ok_or_else(|| super::error(ErrorKind::User, "missing search target".to_owned()))?;
 
-    let mut snippets_by_file = app
+    let all_snippets: Vec<api::Snippet> = app
         .semantic
         .search(&query, 4 * SNIPPET_COUNT as u64) // heuristic
         .await
         .map_err(|e| super::error(ErrorKind::Internal, e.to_string()))?
         .into_iter()
-        .map(|result| {
+        .map(|r| {
             use qdrant_client::qdrant::{value::Kind, Value};
 
             fn value_to_string(value: Value) -> String {
@@ -95,99 +95,75 @@ pub async fn handle(
                 }
             }
 
-            let mut s = result.payload;
+            let mut s = r.payload;
 
-            let lang = value_to_string(s.remove("lang").unwrap());
-            let repo_name = value_to_string(s.remove("repo_name").unwrap());
-            let repo_ref = value_to_string(s.remove("repo_ref").unwrap());
-            let relative_path = value_to_string(s.remove("relative_path").unwrap());
-            let text = value_to_string(s.remove("snippet").unwrap());
-            let score = result.score;
-            let start_line = value_to_string(s.remove("start_line").unwrap())
-                .parse::<usize>()
-                .unwrap();
-            let end_line = value_to_string(s.remove("end_line").unwrap())
-                .parse::<usize>()
-                .unwrap();
-            let start_byte = value_to_string(s.remove("start_byte").unwrap())
-                .parse::<usize>()
-                .unwrap();
-            let end_byte = value_to_string(s.remove("end_byte").unwrap())
-                .parse::<usize>()
-                .unwrap();
+            api::Snippet {
+                lang: value_to_string(s.remove("lang").unwrap()),
+                repo_name: value_to_string(s.remove("repo_name").unwrap()),
+                repo_ref: value_to_string(s.remove("repo_ref").unwrap()),
+                relative_path: value_to_string(s.remove("relative_path").unwrap()),
+                text: value_to_string(s.remove("snippet").unwrap()),
 
-            (
-                relative_path.clone(),
-                api::Snippet {
-                    lang,
-                    repo_name,
-                    repo_ref,
-                    relative_path,
-                    text,
-                    start_line,
-                    end_line,
-                    start_byte,
-                    end_byte,
-                    score,
-                },
-            )
+                start_line: value_to_string(s.remove("start_line").unwrap())
+                    .parse::<usize>()
+                    .unwrap(),
+                end_line: value_to_string(s.remove("end_line").unwrap())
+                    .parse::<usize>()
+                    .unwrap(),
+                start_byte: value_to_string(s.remove("start_byte").unwrap())
+                    .parse::<usize>()
+                    .unwrap(),
+                end_byte: value_to_string(s.remove("end_byte").unwrap())
+                    .parse::<usize>()
+                    .unwrap(),
+                score: r.score,
+            }
         })
-        .fold(HashMap::new(), |mut map, (path, snippet)| {
-            map.entry(path)
-                .and_modify(|v: &mut Vec<_>| v.push(snippet.clone()))
-                .or_insert_with(|| vec![snippet]);
-            map
-        });
+        .collect();
 
-    // remove overlapping snippets in each file
-    for (k, s) in snippets_by_file.iter_mut().filter(|(_, s)| !s.is_empty()) {
-        // sort by ending point of each snippet
-        s.sort_by(|a, b| a.end_line.cmp(&b.end_line));
+    let mut snippets = vec![];
+    let mut chunk_ranges_by_file: HashMap<String, Vec<std::ops::Range<usize>>> = HashMap::new();
 
-        // greedily select snippets that do not overlap
-        // the first element is always selected
-        let mut selected_indices = vec![0usize];
-        let mut rejected_indices = vec![];
+    for snippet in all_snippets.into_iter() {
+        if snippets.len() > SNIPPET_COUNT {
+            break;
+        }
 
-        for next_idx in 1..s.len() {
-            let previous_idx = *selected_indices.last().unwrap();
+        let path = &snippet.relative_path;
+        if !chunk_ranges_by_file.contains_key(path) {
+            chunk_ranges_by_file
+                .entry(path.to_string())
+                .or_insert_with(Vec::new);
+        }
 
-            let previous_item = &s[previous_idx];
-            let next_item = &s[next_idx];
+        if chunk_ranges_by_file.get(path).unwrap().len() <= 2 {
+            // check if line ranges of any added chunk overlap with current chunk
+            let any_overlap = chunk_ranges_by_file
+                .get(path)
+                .unwrap()
+                .iter()
+                .any(|r| (snippet.start_line <= r.end) && (r.start <= snippet.end_line));
 
-            // does the new item overlap with the previously selected item?
-            if next_item.start_line <= previous_item.end_line {
-                // there is an overlap, reject this item
-                rejected_indices.push(next_idx);
-            } else {
-                // no overlap, select this snippet
-                selected_indices.push(next_idx);
+            // no overlap, add snippet
+            if !any_overlap {
+                chunk_ranges_by_file
+                    .entry(path.to_string())
+                    .or_insert_with(Vec::new)
+                    .push(std::ops::Range {
+                        start: snippet.start_line,
+                        end: snippet.end_line,
+                    });
+                snippets.push(snippet);
             }
         }
-
-        tracing::debug!("{} - {} overlapping snippets", k, rejected_indices.len());
-        // remove in reverse order of appearance to avoid shifting of indices
-        rejected_indices.reverse();
-        for idx in rejected_indices {
-            s.remove(idx);
-        }
-
-        s.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap());
     }
 
-    // limit the number of snippets per file to atmost 20% of the total results
-    let per_file_limit = crate::div_ceil(4 * SNIPPET_COUNT, 5);
-    tracing::debug!(%per_file_limit, "setting per-file limit");
-    let mut snippets = snippets_by_file
-        .into_iter()
-        .inspect(|(k, v)| tracing::debug!("{} - {} total snippets after de-overlap", k, v.len()))
-        .flat_map(|(_, v)| v.into_iter().take(per_file_limit))
-        //.flat_map(|(_, v)| v.into_iter())
-        .collect::<Vec<_>>();
-
-    snippets.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap());
-    snippets = snippets.into_iter().take(SNIPPET_COUNT).collect();
-
+    if snippets.is_empty() {
+        return Err(super::error(
+            ErrorKind::Internal,
+            "semantic search returned no snippets",
+        ));
+    }
     if snippets.is_empty() {
         super::error(ErrorKind::Internal, "semantic search returned no snippets");
     }
@@ -212,6 +188,10 @@ pub async fn handle(
         .await
         .map_err(super::internal_error)?
         .trim()
+        .to_string()
+        .clone();
+
+    let relevant_snippet_index = relevant_snippet_index
         .parse::<usize>()
         .map_err(super::internal_error)?;
 
@@ -409,7 +389,7 @@ A:",
 
 Above is a code snippet. \
 Answer the user's question with a detailed response. \
-Separate each function out and explain why it is relevant. \
+Repeat any relevant code, separate each block of code out and explain why it is relevant. \
 Format your response in GitHub markdown with code blocks annotated\
 with programming language. Include the path of the file.
 
