@@ -162,8 +162,7 @@ pub async fn handle(
     let mut snippets = snippets_by_file
         .into_iter()
         .inspect(|(k, v)| tracing::debug!("{} - {} total snippets after de-overlap", k, v.len()))
-        .map(|(_, v)| v.into_iter().take(2))
-        .flatten()
+        .flat_map(|(_, v)| v.into_iter().take(2))
         .collect::<Vec<_>>();
 
     if snippets.is_empty() {
