@@ -13,7 +13,7 @@ use qdrant_client::{
     qdrant::{
         r#match::MatchValue, vectors_config, with_payload_selector::SelectorOptions,
         CollectionOperationResponse, CreateCollection, Distance, FieldCondition, Filter, Match,
-        PointId, PointStruct, SearchPoints, Value, VectorParams, VectorsConfig,
+        PointId, PointStruct, ScoredPoint, SearchPoints, VectorParams, VectorsConfig,
         WithPayloadSelector,
     },
 };
@@ -133,11 +133,7 @@ impl Semantic {
         Ok(pooled.to_owned().as_slice().unwrap().to_vec())
     }
 
-    pub async fn search<'a>(
-        &self,
-        nl_query: &NLQuery<'a>,
-        limit: u64,
-    ) -> Result<Vec<HashMap<String, Value>>> {
+    pub async fn search<'a>(&self, nl_query: &NLQuery<'a>, limit: u64) -> Result<Vec<ScoredPoint>> {
         let Some(query) = nl_query.target() else {
             anyhow::bail!("no search target for query");
         };
@@ -183,7 +179,7 @@ impl Semantic {
             })
             .await?;
 
-        Ok(response.result.into_iter().map(|pt| pt.payload).collect())
+        Ok(response.result)
     }
 
     #[tracing::instrument(skip(self, repo_ref, relative_path, buffer))]

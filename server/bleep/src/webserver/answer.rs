@@ -32,6 +32,7 @@ pub mod api {
         pub end_line: usize,
         pub start_byte: usize,
         pub end_byte: usize,
+        pub score: f32,
     }
 
     #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -78,11 +79,11 @@ pub async fn handle(
 
     let mut snippets_by_file = app
         .semantic
-        .search(&query, params.limit)
+        .search(&query, 20)
         .await
         .map_err(|e| super::error(ErrorKind::Internal, e.to_string()))?
         .into_iter()
-        .map(|mut s| {
+        .map(|result| {
             use qdrant_client::qdrant::{value::Kind, Value};
 
             fn value_to_string(value: Value) -> String {
@@ -92,28 +93,40 @@ pub async fn handle(
                 }
             }
 
+            let mut s = result.payload;
+
+            let lang = value_to_string(s.remove("lang").unwrap());
+            let repo_name = value_to_string(s.remove("repo_name").unwrap());
+            let repo_ref = value_to_string(s.remove("repo_ref").unwrap());
             let relative_path = value_to_string(s.remove("relative_path").unwrap());
+            let text = value_to_string(s.remove("snippet").unwrap());
+            let score = result.score;
+            let start_line = value_to_string(s.remove("start_line").unwrap())
+                .parse::<usize>()
+                .unwrap();
+            let end_line = value_to_string(s.remove("end_line").unwrap())
+                .parse::<usize>()
+                .unwrap();
+            let start_byte = value_to_string(s.remove("start_byte").unwrap())
+                .parse::<usize>()
+                .unwrap();
+            let end_byte = value_to_string(s.remove("end_byte").unwrap())
+                .parse::<usize>()
+                .unwrap();
 
             (
                 relative_path.clone(),
                 api::Snippet {
-                    lang: value_to_string(s.remove("lang").unwrap()),
-                    repo_name: value_to_string(s.remove("repo_name").unwrap()),
-                    repo_ref: value_to_string(s.remove("repo_ref").unwrap()),
+                    lang,
+                    repo_name,
+                    repo_ref,
                     relative_path,
-                    text: value_to_string(s.remove("snippet").unwrap()),
-                    start_line: value_to_string(s.remove("start_line").unwrap())
-                        .parse::<usize>()
-                        .unwrap(),
-                    end_line: value_to_string(s.remove("end_line").unwrap())
-                        .parse::<usize>()
-                        .unwrap(),
-                    start_byte: value_to_string(s.remove("start_byte").unwrap())
-                        .parse::<usize>()
-                        .unwrap(),
-                    end_byte: value_to_string(s.remove("end_byte").unwrap())
-                        .parse::<usize>()
-                        .unwrap(),
+                    text,
+                    start_line,
+                    end_line,
+                    start_byte,
+                    end_byte,
+                    score,
                 },
             )
         })
@@ -156,16 +169,22 @@ pub async fn handle(
         for idx in rejected_indices {
             s.remove(idx);
         }
+
+        s.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap());
     }
 
     // limit the number of snippets per file to atmost 20% of the total results
-    let per_file_limit = crate::div_ceil(params.limit as usize, 5);
-    tracing::debug!(%per_file_limit, "setting per-file limit");
+    // let per_file_limit = crate::div_ceil(params.limit as usize, 5);
+    // tracing::debug!(%per_file_limit, "setting per-file limit");
     let mut snippets = snippets_by_file
         .into_iter()
         .inspect(|(k, v)| tracing::debug!("{} - {} total snippets after de-overlap", k, v.len()))
-        .flat_map(|(_, v)| v.into_iter().take(per_file_limit))
+        //.flat_map(|(_, v)| v.into_iter().take(per_file_limit))
+        .flat_map(|(_, v)| v.into_iter())
         .collect::<Vec<_>>();
+
+    snippets.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap());
+    snippets = snippets.into_iter().take(params.limit as usize).collect();
 
     if snippets.is_empty() {
         super::error(ErrorKind::Internal, "semantic search returned no snippets");
@@ -194,7 +213,9 @@ pub async fn handle(
         .parse::<usize>()
         .map_err(super::internal_error)?;
 
-    let relevant_snippet = &snippets[relevant_snippet_index];
+    let relevant_snippet = snippets
+        .get(relevant_snippet_index)
+        .ok_or_else(|| super::internal_error("answer-api returned out-of-bounds index"))?;
     // grow the snippet by 60 lines above and below, we have sufficient space
     // to grow this snippet by 10 times its original size (15 to 150)
     let processed_snippet = {
@@ -230,6 +251,7 @@ pub async fn handle(
             end_line: relevant_snippet.end_line,
             start_byte: relevant_snippet.start_byte,
             end_byte: relevant_snippet.end_byte,
+            score: relevant_snippet.score,
         }
     };
 
