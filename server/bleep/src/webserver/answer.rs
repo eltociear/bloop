@@ -381,15 +381,15 @@ impl<'a> AnswerAPIClient<'a> {
         // number in the output, with no spaces or punctuation such as fullstops.
         prompt += &format!(
             "\nAbove are {} code snippets separated by \"{DELIMITER}\". \
-            Your job is to select the snippet that best answers the question. Reply\
-            with a single number indicating the index of the snippet in the list.\
-            If none of the snippets seem relevant, reply with \"0\".
+Your job is to select the snippet that best answers the question. Reply\
+with a single number indicating the index of the snippet in the list.\
+If none of the snippets seem relevant, reply with \"0\".
 
-            Q:What icon do we use to clear search history?
-            A:3
+Q:What icon do we use to clear search history?
+A:3
 
-            Q:{}
-            A:",
+Q:{}
+A:",
             snippets.len(),
             self.query,
         );
@@ -401,21 +401,20 @@ impl<'a> AnswerAPIClient<'a> {
 
     fn build_explain_prompt(&self, snippet: &api::Snippet) -> String {
         let prompt = format!(
-            "
-            File: {}
+            "File: {}
 
-            {}
+{}
 
-            #####
+#####
 
-            Above is a code snippet.\
-            Answer the user's question with a detailed response.\
-            Separate each function out and explain why it is relevant.\
-            Format your response in GitHub markdown with code blocks annotated\
-            with programming language. Include the path of the file.
+Above is a code snippet. \
+Answer the user's question with a detailed response. \
+Separate each function out and explain why it is relevant. \
+Format your response in GitHub markdown with code blocks annotated\
+with programming language. Include the path of the file.
 
-            Q:{}
-            A:",
+Q:{}
+A:",
             snippet.relative_path, snippet.text, self.query
         );
         prompt
