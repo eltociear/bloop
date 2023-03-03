@@ -16,9 +16,9 @@ use criterion as _;
 #[cfg(all(feature = "debug", not(tokio_unstable)))]
 use console_subscriber as _;
 
-#[cfg(target = "windows")]
+#[cfg(windows)]
 use dunce::canonicalize;
-#[cfg(not(target = "windows"))]
+#[cfg(not(windows))]
 use std::fs::canonicalize;
 
 use crate::{

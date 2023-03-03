@@ -614,15 +614,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "casey"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fabe85130dda9cf267715582ce6cf1ab581c8dfe3cb33f7065fee0f14e3fea14"
-dependencies = [
- "syn",
-]
-
-[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1575,8 +1566,7 @@ dependencies = [
 [[package]]
 name = "esaxx-rs"
 version = "0.1.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f748b253ceca9fed5f42f8b5ceb3851e93102199bc25b64b65369f76e5c0a35"
+source = "git+https://github.com/bloopai/esaxx-rs#76222cfd485e7c5dbccefb7f836b0fa5497dc03b"
 dependencies = [
  "cc",
 ]
@@ -3636,17 +3626,14 @@ dependencies = [
 
 [[package]]
 name = "ort"
-version = "1.13.2"
-source = "git+https://github.com/bloopai/ort?branch=build-rs-fix#1bd07b2549a90fc6a826fca958911c2f3791d4fa"
+version = "1.14.0"
+source = "git+https://github.com/bloopai/ort?branch=windows#0998a094249bde18349d34017cda4c27b5608d5f"
 dependencies = [
- "casey",
  "flate2",
  "half 2.2.1",
  "lazy_static",
  "libc",
  "ndarray",
- "num-complex",
- "num-traits",
  "tar",
  "thiserror",
  "tracing",
@@ -6438,7 +6425,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "338b31dd1314f68f3aabf3ed57ab922df95ffcd902476ca7ba3c4ce7b908c46d"
 dependencies = [
  "base64 0.13.1",
- "flate2",
  "log",
  "native-tls",
  "once_cell",
