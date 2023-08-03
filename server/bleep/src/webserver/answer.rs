@@ -1528,7 +1528,7 @@ fn trim_utter_history(
     let mut tiktoken_msgs: Vec<tiktoken_rs::ChatCompletionRequestMessage> =
         history.iter().map(|m| m.into()).collect::<Vec<_>>();
 
-    // remove the earliest messages, one by one, until we can accomodate into prompt
+    // remove the earliest messages, one by one, until we can accommodate into prompt
     while tiktoken_rs::get_chat_completion_max_tokens(ANSWER_MODEL, &tiktoken_msgs)? < headroom {
         if !tiktoken_msgs.is_empty() {
             tiktoken_msgs.remove(0);
@@ -1748,7 +1748,7 @@ mod tests {
             vec![llm_gateway::api::Message::user("corge"),]
         );
 
-        // the answer needs just 4000 tokens of 8192, the utter history can accomodate
+        // the answer needs just 4000 tokens of 8192, the utter history can accommodate
         // one long_string, but no more long_strings
         assert_eq!(
             trim_utter_history(history, 4000).unwrap(),
