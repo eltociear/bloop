@@ -27,8 +27,8 @@ where
         app: &tauri::AppHandle<R>,
         _config: serde_json::Value,
     ) -> tauri::plugin::Result<()> {
-        let cache_dir = app.path_resolver().app_cache_dir().unwrap();
-        let qdrant_dir = cache_dir.join("qdrant");
+        let data_dir = app.path_resolver().app_data_dir().unwrap();
+        let qdrant_dir = data_dir.join("qdrant");
         let qd_config_dir = qdrant_dir.join("config");
         create_dir_all(&qd_config_dir).unwrap();
         write(
@@ -97,17 +97,20 @@ fn run_command(command: &Path, qdrant_dir: &Path) -> Child {
 
 #[cfg(windows)]
 fn run_command(command: &Path, qdrant_dir: &Path) -> Child {
+    use std::os::windows::process::CommandExt;
+
     Command::new(command)
         .current_dir(qdrant_dir)
+        // Add a CREATE_NO_WINDOW flag to prevent qdrant console popup
+        .creation_flags(0x08000000)
         .spawn()
         .expect("failed to start qdrant")
 }
 
 async fn wait_for_qdrant() {
     use qdrant_client::prelude::*;
-    let qdrant = QdrantClient::new(Some(QdrantClientConfig::from_url("http://127.0.0.1:6334")))
-        .await
-        .unwrap();
+    let qdrant =
+        QdrantClient::new(Some(QdrantClientConfig::from_url("http://127.0.0.1:6334"))).unwrap();
 
     for _ in 0..60 {
         if qdrant.health_check().await.is_ok() {

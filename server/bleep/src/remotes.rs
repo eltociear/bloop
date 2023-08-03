@@ -2,33 +2,27 @@
 use std::os::windows::process::CommandExt;
 use std::{
     borrow::Borrow,
+    collections::HashMap,
     path::{Path, PathBuf},
-    process::Command,
     sync::Arc,
 };
 
-use dashmap::{mapref::one::Ref, DashMap};
-use git2::{Cred, CredentialType, RemoteCallbacks};
+use anyhow::Context;
+use gix::sec::identity::Account;
 use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 use crate::{
+    background::SyncHandle,
     remotes,
-    repo::{Backend, RepoRef, Repository, SyncStatus},
+    repo::{Backend, RepoError, RepoRef, Repository, SyncStatus},
     Application,
 };
 
 pub mod github;
 
-mod poll;
-pub(crate) use poll::*;
-
-type GitCreds = Box<
-    dyn FnMut(&str, Option<&str>, CredentialType) -> std::result::Result<Cred, git2::Error>
-        + Send
-        + 'static,
->;
+type GitCreds = Account;
 
 pub(crate) type Result<T> = std::result::Result<T, RemoteError>;
 #[derive(thiserror::Error, Debug)]
@@ -39,9 +33,6 @@ pub(crate) enum RemoteError {
     #[error("permission denied")]
     PermissionDenied,
 
-    #[error("invalid checkout state")]
-    InvalidLocalState,
-
     #[error("syncing in progress")]
     SyncInProgress,
 
@@ -50,6 +41,9 @@ pub(crate) enum RemoteError {
 
     #[error("operation not supported: {0}")]
     NotSupported(&'static str),
+
+    #[error("persistence error: {0}")]
+    Repo(#[from] RepoError),
 
     #[error("IO error: {0}")]
     IO(#[from] std::io::Error),
@@ -60,109 +54,97 @@ pub(crate) enum RemoteError {
     #[error("github access error: {0}")]
     GitHub(#[from] octocrab::Error),
 
-    #[error("low-level code: {0:?}")]
-    UnspecifiedGit(git2::Error),
+    #[error("anyhow: {0:?}")]
+    Anyhow(#[from] anyhow::Error),
+
+    #[error("underlying thread died: {0:?}")]
+    JoinError(#[from] tokio::task::JoinError),
+
+    #[error("git open: {0:?}")]
+    GitOpen(#[from] gix::open::Error),
+
+    #[error("git prepare fetch: {0:?}")]
+    GitPrepareFetch(#[from] gix::remote::fetch::prepare::Error),
+
+    #[error("git fetch: {0:?}")]
+    GitFetch(#[from] gix::remote::fetch::Error),
+
+    #[error("git find remote: {0:?}")]
+    GitFindRemote(#[from] gix::remote::find::existing::Error),
+
+    #[error("git find remote: {0:?}")]
+    GitConnect(#[from] gix::remote::connect::Error),
+
+    #[error("git clone: {0:?}")]
+    GitClone(#[from] gix::clone::Error),
+
+    #[error("git clone fetch: {0:?}")]
+    GitCloneFetch(#[from] gix::clone::fetch::Error),
 }
 
-impl From<git2::Error> for RemoteError {
-    fn from(value: git2::Error) -> Self {
-        use git2::ErrorCode::*;
+macro_rules! creds_callback(($auth:ident) => {{
+    use gix::{
+	credentials::{
+            helper::{Action, NextAction},
+            protocol::Outcome,
+	}};
 
-        match value.code() {
-            Auth => RemoteError::PermissionDenied,
-            NotFound => RemoteError::RemoteNotFound,
-            _ => RemoteError::UnspecifiedGit(value),
-        }
+    let auth = $auth.clone();
+    move |action| match action {
+        Action::Get(ctx) => Ok(Some(Outcome {
+            identity: auth.clone(),
+            next: NextAction::from(ctx),
+        })),
+        Action::Store(_) => Ok(None),
+        Action::Erase(_) => Ok(None),
     }
-}
+}});
 
 async fn git_clone(auth: GitCreds, url: &str, target: &Path) -> Result<()> {
     let url = url.to_owned();
     let target = target.to_owned();
 
     tokio::task::spawn_blocking(move || {
-        let options = {
-            let mut callbacks = RemoteCallbacks::new();
-            callbacks.credentials(auth);
+        let clone = gix::prepare_clone_bare(url, target)?;
+        let (_repo, _outcome) = clone
+            .configure_connection(move |con| {
+                con.set_credentials(creds_callback!(auth));
+                Ok(())
+            })
+            .fetch_only(gix::progress::Discard, &false.into())?;
 
-            let mut fo = git2::FetchOptions::new();
-            fo.remote_callbacks(callbacks);
-            fo
-        };
-
-        let mut builder = git2::build::RepoBuilder::new();
-        builder.fetch_options(options);
-        builder.clone(&url, &target)
+        Ok(())
     })
-    .await
-    .expect("git failed")?;
-
-    Ok(())
+    .await?
 }
 
 async fn git_pull(auth: GitCreds, repo: &Repository) -> Result<()> {
+    use gix::remote::Direction;
+
     let disk_path = repo.disk_path.to_owned();
-
     tokio::task::spawn_blocking(move || {
-        let git = git2::Repository::open(&disk_path)?;
-        let head = git.head()?;
-        let branch = head
-            .name()
-            .ok_or(RemoteError::InvalidLocalState)?
-            .split('/')
-            .last()
-            .ok_or(RemoteError::InvalidLocalState)?;
+        let repo = gix::open(disk_path)?;
+        let remote = repo
+            .find_default_remote(Direction::Fetch)
+            .context("no remote found")??;
+        remote
+            .connect(Direction::Fetch)?
+            .with_credentials(creds_callback!(auth))
+            .prepare_fetch(gix::progress::Discard, Default::default())?
+            .receive(gix::progress::Discard, &false.into())?;
 
-        let mut options = {
-            let mut callbacks = RemoteCallbacks::new();
-            callbacks.credentials(auth);
-
-            let mut fo = git2::FetchOptions::new();
-            fo.remote_callbacks(callbacks);
-            fo
-        };
-
-        let mut remote = git.find_remote("origin")?;
-        remote.fetch(&[&branch], Some(&mut options), None)?;
-
-        let fetch_head = git.find_reference("FETCH_HEAD")?;
-        let new_head = fetch_head.peel(git2::ObjectType::Commit)?;
-
-        Ok::<_, RemoteError>(git.reset(
-            &new_head,
-            git2::ResetType::Hard,
-            Some(git2::build::CheckoutBuilder::new().force()),
-        )?)
+        Ok(())
     })
-    .await
-    .expect("git failed")?;
-
-    let mut git_gc = Command::new("git");
-
-    git_gc.arg("gc");
-    git_gc.current_dir(&repo.disk_path);
-
-    #[cfg(windows)]
-    git_gc.creation_flags(0x08000000); // add a CREATE_NO_WINDOW flag to prevent window focus change
-
-    match tokio::process::Command::from(git_gc).spawn() {
-        Ok(_) => {
-            // don't actually want to wait for this to finish, as `git` may
-            // not even be available as a command.
-        }
-        Err(err) => {
-            warn!(?err, "failed to invoke git-gc");
-        }
-    }
-
-    Ok(())
+    .await?
 }
 
 pub(crate) fn gather_repo_roots(
     path: impl AsRef<Path>,
     exclude: Option<PathBuf>,
-) -> impl Iterator<Item = RepoRef> {
+) -> std::collections::HashSet<RepoRef> {
     const RECOGNIZED_VCS_DIRS: &[&str] = &[".git"];
+
+    let repos = Arc::new(scc::HashSet::new());
 
     WalkBuilder::new(path)
         .ignore(true)
@@ -180,24 +162,44 @@ pub(crate) fn gather_repo_roots(
                 })
                 .unwrap_or(true)
         })
-        .build()
-        .filter_map(|entry| {
-            entry.ok().and_then(|de| match de.file_type() {
-                Some(ft)
-                    if ft.is_dir()
-                        && RECOGNIZED_VCS_DIRS
-                            .contains(&de.file_name().to_string_lossy().as_ref()) =>
+        .build_parallel()
+        .run(|| {
+            let repos = repos.clone();
+            Box::new(move |entry| {
+                use ignore::WalkState::*;
+
+                let Ok(de) = entry else {
+		    return Continue;
+		};
+
+                let Some(ft) = de.file_type() else {
+		    return Continue;
+		};
+
+                if ft.is_dir()
+                    && RECOGNIZED_VCS_DIRS.contains(&de.file_name().to_string_lossy().as_ref())
                 {
-                    Some(RepoRef::from(
+                    _ = repos.insert(RepoRef::from(
                         &crate::canonicalize(
                             de.path().parent().expect("/ shouldn't be a git repo"),
                         )
                         .expect("repo root is both a dir and exists"),
-                    ))
+                    ));
+
+                    // we've already taken this repo, do not search subdirectories
+                    return Skip;
                 }
-                _ => None,
+
+                Continue
             })
-        })
+        });
+
+    let mut output = std::collections::HashSet::default();
+    repos.scan(|entry| {
+        output.insert(entry.clone());
+    });
+
+    output
 }
 
 struct BackendEntry {
@@ -219,24 +221,29 @@ impl From<BackendCredential> for BackendEntry {
 
 #[derive(Clone)]
 pub struct Backends {
-    backends: Arc<DashMap<Backend, BackendEntry>>,
+    /// If the environment is a Tauri app, or auth is instance-wide,
+    /// This will refresh the correct user.
+    authenticated_user: Arc<std::sync::RwLock<Option<String>>>,
+    backends: Arc<scc::HashMap<Backend, BackendEntry>>,
 }
 
-impl From<DashMap<Backend, BackendCredential>> for Backends {
-    fn from(value: DashMap<Backend, BackendCredential>) -> Self {
+impl From<HashMap<Backend, BackendCredential>> for Backends {
+    fn from(mut value: HashMap<Backend, BackendCredential>) -> Self {
+        let backends = Arc::new(scc::HashMap::default());
+        for (k, v) in value.drain() {
+            _ = backends.insert(k, v.into());
+        }
+
         Self {
-            backends: Arc::new(value.into_iter().map(|(k, v)| (k, v.into())).collect()),
+            backends,
+            authenticated_user: Arc::default(),
         }
     }
 }
 
 impl Backends {
     pub(crate) fn for_repo(&self, repo: &RepoRef) -> Option<BackendCredential> {
-        let Some(handle) = self.backends.get(&repo.backend()) else {
-		return None;
-	    };
-
-        Some(handle.value().inner.clone())
+        self.backends.read(&repo.backend(), |_, v| v.inner.clone())
     }
 
     pub(crate) fn remove(&self, backend: impl Borrow<Backend>) -> Option<BackendCredential> {
@@ -244,12 +251,10 @@ impl Backends {
     }
 
     pub(crate) fn github(&self) -> Option<github::State> {
-        let Some(handle) = self.backends.get(&Backend::Github) else {
-	    return None;
-	};
-
-        let BackendCredential::Github(ref github) = handle.value().inner;
-        Some(github.clone())
+        self.backends.read(&Backend::Github, |_, v| {
+            let BackendCredential::Github(ref github) = v.inner;
+            github.clone()
+        })
     }
 
     pub(crate) fn set_github(&self, gh: github::State) {
@@ -257,22 +262,33 @@ impl Backends {
             .entry(Backend::Github)
             .and_modify(|existing| {
                 existing.inner = BackendCredential::Github(gh.clone());
-                existing.updated_tx.send(()).unwrap();
+                _ = existing.updated_tx.send(());
             })
             .or_insert_with(|| BackendCredential::Github(gh).into());
     }
 
     pub(crate) fn github_updated(&self) -> Option<flume::Receiver<()>> {
         self.backends
-            .get(&Backend::Github)
-            .map(|v| v.updated.clone())
+            .read(&Backend::Github, |_, v| v.updated.clone())
     }
 
-    pub(crate) fn serialize(&self) -> DashMap<Backend, BackendCredential> {
+    pub(crate) async fn serialize(&self) -> impl Serialize + Send + Sync {
+        let mut output = HashMap::new();
         self.backends
-            .iter()
-            .map(|entry| (entry.key().clone(), entry.value().inner.clone()))
-            .collect()
+            .scan_async(|k, v| {
+                output.insert(k.clone(), v.inner.clone());
+            })
+            .await;
+
+        output
+    }
+
+    pub(crate) async fn set_user(&self, user: String) {
+        self.authenticated_user.write().unwrap().replace(user);
+    }
+
+    pub(crate) fn user(&self) -> Option<String> {
+        self.authenticated_user.read().unwrap().clone()
     }
 }
 
@@ -282,67 +298,58 @@ pub(crate) enum BackendCredential {
 }
 
 impl BackendCredential {
-    pub(crate) async fn sync(self, app: Application, repo_ref: RepoRef) -> Result<()> {
+    #[tracing::instrument(fields(repo=%sync_handle.reporef), skip_all)]
+    pub(crate) async fn sync(self, sync_handle: &SyncHandle) -> Result<()> {
+        let SyncHandle { app, .. } = sync_handle;
+
         use BackendCredential::*;
+        let existing = sync_handle.sync_lock().await;
 
-        let existing = app.repo_pool.get_mut(&repo_ref);
-        let synced = match existing {
-            // if there's a parallel process already syncing, just return
-            Some(repo) if repo.sync_status == SyncStatus::Syncing => {
-                return Err(RemoteError::SyncInProgress)
-            }
-            Some(mut repo) => {
-                repo.value_mut().sync_status = SyncStatus::Syncing;
-                let repo = repo.downgrade();
-
-                match self {
-                    Github(gh) => gh.auth.pull_repo(&repo).await,
+        let Github(gh) = self;
+        let mut synced = match existing {
+            Err(err) => return Err(err),
+            Ok(repo) if repo.last_index_unix_secs == 0 && repo.disk_path.exists() => {
+                // it is possible syncing was killed, but the repo is
+                // intact. pull if the dir exists, then quietly revert
+                // to cloning if that fails
+                if let Ok(success) = gh.auth.pull_repo(&repo).await {
+                    Ok(success)
+                } else {
+                    gh.auth.clone_repo(&repo).await
                 }
             }
-            None => {
-                let repo = create_repository(&app, &repo_ref);
-
-                match self {
-                    Github(gh) => gh.auth.clone_repo(&repo, &repo.disk_path.clone()).await,
-                }
-            }
+            Ok(repo) if repo.last_index_unix_secs == 0 => gh.auth.clone_repo(&repo).await,
+            Ok(repo) => gh.auth.pull_repo(&repo).await,
         };
 
         let new_status = match synced {
             Ok(_) => SyncStatus::Queued,
-            Err(ref err) => SyncStatus::Error {
-                message: err.to_string(),
-            },
+            Err(err) => {
+                warn!(?err, "sync failed; removing dir before retry");
+
+                let repo = sync_handle
+                    .repo()
+                    .expect("repo exists & locked, this shouldn't happen");
+
+                // try cloning again
+                let removed = tokio::fs::remove_dir_all(&repo.disk_path).await;
+                debug!(?removed, "removing recursively");
+
+                synced = gh.auth.clone_repo(&repo).await;
+                match synced {
+                    Ok(_) => SyncStatus::Queued,
+                    Err(ref err) => SyncStatus::Error {
+                        message: err.to_string(),
+                    },
+                }
+            }
         };
 
-        app.repo_pool
-            .get_mut(&repo_ref)
-            .unwrap()
-            .value_mut()
-            .sync_status = new_status;
+        sync_handle
+            .set_status(|_| new_status)
+            .expect("unlocking repo failed, this shouldn't happen");
 
+        app.config.source.save_pool(app.repo_pool.clone())?;
         synced
     }
-}
-
-fn create_repository<'a>(app: &'a Application, reporef: &RepoRef) -> Ref<'a, RepoRef, Repository> {
-    let name = reporef.to_string();
-    let disk_path = app
-        .config
-        .source
-        .repo_path_for_name(&name.replace('/', "_"));
-
-    let remote = reporef.as_ref().into();
-
-    app.repo_pool
-        .entry(reporef.clone())
-        .or_insert_with(|| Repository {
-            disk_path,
-            remote,
-            sync_status: SyncStatus::Syncing,
-            last_index_unix_secs: 0,
-            last_commit_unix_secs: 0,
-            most_common_lang: None,
-        })
-        .downgrade()
 }

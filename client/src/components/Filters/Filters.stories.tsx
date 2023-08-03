@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import { MemoryRouter } from 'react-router-dom';
+import { UIContextProvider } from '../../context/providers/UiContextProvider';
+import { RepoSource } from '../../types';
 import FilterSection from './FilterSection';
 import Filters from './index';
-import '../../index.css';
 
 export default {
   title: 'components/Filters',
@@ -43,15 +44,21 @@ const initialSections = [
 ];
 
 export const Default = () => {
-  const [isOpen, setIsOpen] = useState(true);
   return (
     <MemoryRouter initialEntries={['']}>
-      <div style={{ backgroundColor: '#131315', width: 350 }}>
-        <Filters
-          isOpen={isOpen}
-          toggleOpen={() => setIsOpen((prev) => !prev)}
-        />
-      </div>
+      <UIContextProvider
+        tab={{
+          name: 'bloop',
+          key: 'bloop',
+          repoName: 'bloop',
+          navigationHistory: [],
+          source: RepoSource.LOCAL,
+        }}
+      >
+        <div style={{ width: 350 }}>
+          <Filters />
+        </div>
+      </UIContextProvider>
     </MemoryRouter>
   );
 };
@@ -65,7 +72,7 @@ export const Checkboxes = () => {
   ]);
   const [isOpen, setIsOpen] = useState(true);
   return (
-    <div style={{ backgroundColor: '#131315', width: 350 }}>
+    <div style={{ width: 350 }}>
       <FilterSection
         items={items}
         onChange={(i, b) => {
@@ -95,7 +102,7 @@ export const ClickableLines = () => {
   ]);
   const [isOpen, setIsOpen] = useState(true);
   return (
-    <div style={{ backgroundColor: '#131315', width: 350 }}>
+    <div style={{ width: 350 }}>
       <FilterSection
         items={items}
         onChange={(i, b) => {

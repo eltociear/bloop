@@ -4,7 +4,7 @@ use octocrab::{
     models::{Installation, InstallationToken},
     Octocrab,
 };
-use reqwest::StatusCode;
+
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
@@ -31,11 +31,11 @@ impl State {
         self.auth.client()
     }
 
-    pub(crate) async fn validate(&self) -> Result<()> {
+    pub(crate) async fn validate(&self) -> Result<Option<String>> {
         let client = self.client()?;
 
-        match client.current().user().await {
-            Ok(_) => {}
+        let username = match client.current().user().await {
+            Ok(user) => Some(user.login),
             Err(e @ octocrab::Error::GitHub { .. }) => {
                 warn!(?e, "failed to validate GitHub token");
                 return Err(e)?;
@@ -44,10 +44,11 @@ impl State {
                 // Don't return an error here - we want to swallow failure and try again on the
                 // next poll.
                 error!(?e, "failed to make GitHub user request");
+                None
             }
-        }
+        };
 
-        Ok(())
+        Ok(username)
     }
 
     pub(crate) fn expiry(&self) -> Option<DateTime<Utc>> {
@@ -113,7 +114,7 @@ impl Auth {
     ) -> Result<Self> {
         let token: InstallationToken = octocrab
             .post(
-                format!("app/installations/{install_id}/access_tokens"),
+                format!("/app/installations/{install_id}/access_tokens"),
                 None::<&()>,
             )
             .await?;
@@ -127,9 +128,9 @@ impl Auth {
 }
 
 impl Auth {
-    pub(crate) async fn clone_repo(&self, repo: &Repository, target: &Path) -> Result<()> {
+    pub(crate) async fn clone_repo(&self, repo: &Repository) -> Result<()> {
         self.check_repo(repo).await?;
-        git_clone(self.git_cred(), &repo.remote.to_string(), target).await
+        git_clone(self.git_cred(), &repo.remote.to_string(), &repo.disk_path).await
     }
 
     pub(crate) async fn pull_repo(&self, repo: &Repository) -> Result<()> {
@@ -158,24 +159,22 @@ impl Auth {
             },
             // I'm leaving this here for completeness' sake, this likely isn't exercised
             // Octocrab seems to treat GitHub application-layer errors as higher priority
-            Err(octocrab::Error::Http { ref source, .. }) => match source.status() {
-                Some(StatusCode::NOT_FOUND) => Err(RemoteError::RemoteNotFound),
-                Some(StatusCode::FORBIDDEN) => Err(RemoteError::PermissionDenied),
-                _ => Ok(response.map(|_| ())?),
-            },
+            Err(octocrab::Error::Http { .. }) => Err(RemoteError::PermissionDenied),
             _ => Ok(response.map(|_| ())?),
         }
     }
 
     fn git_cred(&self) -> GitCreds {
         use Auth::*;
-        match self.clone() {
-            OAuth { access_token, .. } => {
-                Box::new(move |_, _, _| Cred::userpass_plaintext(access_token.expose_secret(), ""))
-            }
-            App { token, .. } => Box::new(move |_, _, _| {
-                Cred::userpass_plaintext("x-access-token", token.expose_secret())
-            }),
+        match self {
+            OAuth { access_token, .. } => GitCreds {
+                username: access_token.expose_secret().into(),
+                password: "".into(),
+            },
+            App { token, .. } => GitCreds {
+                username: "x-access-token".into(),
+                password: token.expose_secret().into(),
+            },
         }
     }
 
@@ -261,7 +260,7 @@ pub(crate) async fn refresh_github_installation_token(app: &Application) -> Resu
         .build()?;
 
     let installation: Installation = octocrab
-        .get(format!("app/installations/{install_id}"), None::<&()>)
+        .get(format!("/app/installations/{install_id}"), None::<&()>)
         .await?;
 
     if !matches!(installation.target_type.as_deref(), Some("Organization")) {

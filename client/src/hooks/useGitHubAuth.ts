@@ -22,8 +22,8 @@ export const useGitHubAuth = (
   const [codeCopied, setCodeCopied] = useState(false);
   const [tokenExpireIn, setTokenExpireIn] = useState<string | null>(null);
   const [timer, setTimer] = useState(0);
-  const [deadline] = useState(Date.now() + 10 * 60 * 1000);
-  const { setGithubConnected } = useContext(UIContext);
+  const [deadline, setDeadline] = useState(Date.now() + 10 * 60 * 1000);
+  const { setGithubConnected } = useContext(UIContext.GitHubConnected);
   const { openLink } = useContext(DeviceContext);
 
   useEffect(() => {
@@ -72,16 +72,20 @@ export const useGitHubAuth = (
   };
 
   useEffect(() => {
-    if (loginUrl) {
+    if (code) {
       let intervalId: number;
+      setDeadline(Date.now() + 10 * 60 * 1000);
       intervalId = window.setInterval(() => {
         setTimer((prevState) => prevState + 0.5);
       }, 500);
       checkGHAuth();
-      setTimeout(() => {
-        clearInterval(intervalId);
-        setAuthenticationFailed(true);
-      }, 10 * 60 * 1000);
+      setTimeout(
+        () => {
+          clearInterval(intervalId);
+          setAuthenticationFailed(true);
+        },
+        10 * 60 * 1000,
+      );
 
       return () => {
         if (intervalId) {
@@ -89,7 +93,7 @@ export const useGitHubAuth = (
         }
       };
     }
-  }, [loginUrl]);
+  }, [code]);
 
   useEffect(() => {
     if (!disabled && loginUrl) {

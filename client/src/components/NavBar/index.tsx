@@ -1,29 +1,105 @@
-import { LogoSmall } from '../../icons';
-import useAppNavigation from '../../hooks/useAppNavigation';
-import NavBarNoUser from './NoUser';
-import NavBarUser from './User';
+import React, { useContext } from 'react';
+import { useTranslation } from 'react-i18next';
+import { Bug, Cog, DoorRight, Magazine, Person } from '../../icons';
+import { MenuListItemType } from '../ContextMenu';
+import { deleteAuthCookie } from '../../utils';
+import DropdownWithIcon from '../Dropdown/WithIcon';
+import { UIContext } from '../../context/uiContext';
+import { DeviceContext } from '../../context/deviceContext';
+import { TabsContext } from '../../context/tabsContext';
+import { gitHubLogout } from '../../services/api';
+import { RepoSource } from '../../types';
+import Tab from './Tab';
 
 type Props = {
-  userSigned?: boolean;
   isSkeleton?: boolean;
 };
 
-const NavBar = ({ userSigned, isSkeleton }: Props) => {
-  const { navigateHome } = useAppNavigation();
+const NavBar = ({ isSkeleton }: Props) => {
+  const { t } = useTranslation();
+  const { setSettingsOpen } = useContext(UIContext.Settings);
+  const { setBugReportModalOpen } = useContext(UIContext.BugReport);
+  const { setShouldShowWelcome } = useContext(UIContext.Onboarding);
+  const { setGithubConnected } = useContext(UIContext.GitHubConnected);
+  const { openLink, isSelfServe, os, envConfig } = useContext(DeviceContext);
+  const { tabs, setActiveTab, activeTab, handleRemoveTab } =
+    useContext(TabsContext);
+
   return (
     <div
-      className={`h-16 flex items-center gap-6 px-8 bg-gray-800/75 fixed top-0 left-0 right-0 z-30 ${
-        userSigned ? '' : 'justify-between'
-      } border-b border-gray-700 backdrop-blur-8`}
+      className={`h-8 flex items-center px-8 bg-bg-base fixed top-0 left-0 right-0 z-80
+       border-b border-bg-border backdrop-blur-8 select-none`}
+      data-tauri-drag-region
     >
+      {os.type === 'Darwin' ? <span className="w-14" /> : ''}
+      <Tab
+        tabKey="initial"
+        name="Home"
+        key="initial"
+        source={RepoSource.LOCAL}
+      />
+      <div
+        className={`flex-1 flex items-center justify-start h-full overflow-x-auto pb-1 -mb-1 pr-6 fade-right`}
+        data-tauri-drag-region
+      >
+        {!isSkeleton &&
+          tabs
+            .slice(1)
+            .map((t) => (
+              <Tab tabKey={t.key} name={t.name} key={t.key} source={t.source} />
+            ))}
+      </div>
       {!isSkeleton && (
-        <span className="text-gray-50">
-          <button onClick={navigateHome}>
-            <LogoSmall />
-          </button>
-        </span>
+        <div>
+          <DropdownWithIcon
+            items={[
+              {
+                text: t('Settings'),
+                icon: <Cog />,
+                type: MenuListItemType.DEFAULT,
+                onClick: () => setSettingsOpen(true),
+              },
+              {
+                text: t('Documentation'),
+                icon: <Magazine />,
+                type: MenuListItemType.DEFAULT,
+                onClick: () => openLink('https://bloop.ai/docs'),
+              },
+              {
+                text: t('Report a bug'),
+                icon: <Bug />,
+                type: MenuListItemType.DEFAULT,
+                onClick: () => setBugReportModalOpen(true),
+              },
+              {
+                text: t('Sign out'),
+                icon: <DoorRight />,
+                type: MenuListItemType.DEFAULT,
+                onClick: () => {
+                  setShouldShowWelcome(true);
+                  deleteAuthCookie();
+                  setGithubConnected(false);
+                  if (!isSelfServe) {
+                    gitHubLogout();
+                  }
+                },
+              },
+            ]}
+            icon={
+              envConfig.github_user?.avatar_url ? (
+                <div className="w-5 h-5 rounded-full overflow-hidden">
+                  <img src={envConfig.github_user?.avatar_url} alt="avatar" />
+                </div>
+              ) : (
+                <Person />
+              )
+            }
+            dropdownBtnClassName="-mr-4"
+            btnSize="tiny"
+            btnVariant="tertiary"
+          />
+        </div>
       )}
-      {userSigned ? <NavBarUser isSkeleton={isSkeleton} /> : <NavBarNoUser />}
     </div>
   );
 };

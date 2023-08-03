@@ -160,16 +160,21 @@ fn plan_to_query(plan: planner::Fragment, field: Field, case_sensitive: bool) ->
     match plan {
         planner::Fragment::Literal(s) => {
             let queries = trigrams(&s)
-                .flat_map(|s| {
-                    if case_sensitive {
+                .map(|s| {
+                    let tokens = if case_sensitive {
                         Either::Left(std::iter::once(s))
                     } else {
                         Either::Right(case_permutations(&s))
-                    }
+                    };
+
+                    let subqueries = tokens
+                        .map(|token| Term::from_field_text(field, &token))
+                        .map(|term| TermQuery::new(term, IndexRecordOption::WithFreqs))
+                        .map(|q| Box::new(q) as DynQuery)
+                        .collect::<Vec<_>>();
+
+                    Box::new(BooleanQuery::union(subqueries)) as DynQuery
                 })
-                .map(|token| Term::from_field_text(field, &token))
-                .map(|term| TermQuery::new(term, IndexRecordOption::WithFreqs))
-                .map(|q| Box::new(q) as DynQuery)
                 .collect::<Vec<_>>();
 
             Box::new(BooleanQuery::intersection(queries))
@@ -199,7 +204,7 @@ fn str_to_query(field: Field, s: &str) -> DynQuery {
 
 /// Split a string into trigrams, returning a bigram or unigram if the string is shorter than 3
 /// characters.
-fn trigrams(s: &str) -> impl Iterator<Item = CompactString> {
+pub fn trigrams(s: &str) -> impl Iterator<Item = CompactString> {
     let mut chars = s.chars().collect::<SmallVec<[char; 6]>>();
 
     std::iter::from_fn(move || match chars.len() {
@@ -217,7 +222,7 @@ fn trigrams(s: &str) -> impl Iterator<Item = CompactString> {
 ///
 /// This permutes each character by ASCII lowercase and uppercase variants. Characters which do not
 /// have case variants remain unchanged.
-fn case_permutations(s: &str) -> impl Iterator<Item = CompactString> {
+pub fn case_permutations(s: &str) -> impl Iterator<Item = CompactString> {
     // This implements a bitmask-based algorithm. The purpose is not speed; rather, a bitmask is
     // a simple way to get all combinations of a set of flags without allocating, sorting, or doing
     // anything else that is fancy.
@@ -365,7 +370,12 @@ mod tests {
             let (occur, query) = clause;
             assert_eq!(*occur, Occur::Must);
 
-            let term = query.downcast_ref::<TermQuery>().unwrap();
+            let subquery = query.downcast_ref::<BooleanQuery>().unwrap();
+            assert_eq!(subquery.clauses().len(), 1);
+
+            let (occur, term) = &subquery.clauses()[0];
+            let term = term.downcast_ref::<TermQuery>().unwrap();
+            assert_eq!(*occur, Occur::Should);
             assert_eq!(term.term().as_str().unwrap(), expected);
         }
     }

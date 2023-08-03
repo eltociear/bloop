@@ -1,4 +1,5 @@
 import React, { createContext } from 'react';
+import { Theme } from '../types';
 
 type ContextType = {
   isSettingsOpen: boolean;
@@ -14,20 +15,65 @@ type ContextType = {
   isGithubConnected: boolean;
   setGithubConnected: (b: boolean) => void;
   isGithubChecked: boolean;
+  shouldShowWelcome: boolean;
+  setShouldShowWelcome: (b: boolean) => void;
+  isRightPanelOpen: boolean;
+  setRightPanelOpen: React.Dispatch<React.SetStateAction<boolean>>;
+  isFiltersOpen: boolean;
+  setFiltersOpen: React.Dispatch<React.SetStateAction<boolean>>;
+  tab: { key: string; name: string; repoName: string };
+  theme: Theme;
+  setTheme: (s: Theme) => void;
+  isPromptGuideOpen: boolean;
+  setPromptGuideOpen: (b: boolean) => void;
 };
 
-export const UIContext = createContext<ContextType>({
-  isSettingsOpen: false,
-  setSettingsOpen: (b) => {},
-  symbolsCollapsed: true,
-  setSymbolsCollapsed: (b) => {},
-  settingsSection: 0,
-  setSettingsSection: (s) => {},
-  onBoardingState: {},
-  setOnBoardingState: (state: Record<string, any>) => {},
-  isBugReportModalOpen: false,
-  setBugReportModalOpen: () => {},
-  isGithubConnected: false,
-  setGithubConnected: () => {},
-  isGithubChecked: false,
-});
+export const UIContext = {
+  Settings: createContext({
+    isSettingsOpen: false,
+    setSettingsOpen: (b: boolean) => {},
+    settingsSection: 0,
+    setSettingsSection: (n: number) => {},
+  }),
+  Symbols: createContext({
+    symbolsCollapsed: true,
+    setSymbolsCollapsed: (b: boolean) => {},
+  }),
+  Onboarding: createContext({
+    shouldShowWelcome: false,
+    setShouldShowWelcome: (b: boolean) => {},
+    onBoardingState: {},
+    setOnBoardingState: (state: Record<string, any>) => {},
+  }),
+  BugReport: createContext({
+    isBugReportModalOpen: false,
+    setBugReportModalOpen: (b: boolean) => {},
+  }),
+  GitHubConnected: createContext({
+    isGithubConnected: false,
+    setGithubConnected: (b: boolean) => {},
+    isGithubChecked: false,
+  }),
+  RightPanel: createContext({
+    isRightPanelOpen: false,
+    setRightPanelOpen: (b: boolean) => {},
+  }),
+  Filters: createContext<{
+    isFiltersOpen: boolean;
+    setFiltersOpen: React.Dispatch<React.SetStateAction<boolean>>;
+  }>({
+    isFiltersOpen: false,
+    setFiltersOpen: () => {},
+  }),
+  PromptGuide: createContext({
+    isPromptGuideOpen: false,
+    setPromptGuideOpen: (b: boolean) => {},
+  }),
+  Tab: createContext({
+    tab: { key: 'initial', name: 'Home', repoName: '' },
+  }),
+  Theme: createContext({
+    theme: 'system' as Theme,
+    setTheme: (t: Theme) => {},
+  }),
+};

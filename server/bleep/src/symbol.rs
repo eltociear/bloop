@@ -1,9 +1,8 @@
 use crate::{intelligence::ScopeGraph, text_range::TextRange};
 
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Symbol {
     pub kind: String,
     pub range: TextRange,
@@ -13,9 +12,6 @@ pub struct Symbol {
 #[derive(Default, Debug, Clone, Deserialize, Serialize)]
 #[non_exhaustive]
 pub enum SymbolLocations {
-    /// ctags powered symbol-locations
-    Ctags(Vec<Symbol>),
-
     /// tree-sitter powered symbol-locations (and more!)
     TreeSitter(ScopeGraph),
 
@@ -27,9 +23,15 @@ pub enum SymbolLocations {
 impl SymbolLocations {
     pub fn list(&self) -> Vec<Symbol> {
         match self {
-            Self::Ctags(symbols) => symbols.to_vec(),
             Self::TreeSitter(graph) => graph.symbols(),
             Self::Empty => Vec::new(),
+        }
+    }
+
+    pub fn scope_graph(&self) -> Option<&ScopeGraph> {
+        match self {
+            Self::TreeSitter(graph) => Some(graph),
+            Self::Empty => None,
         }
     }
 }

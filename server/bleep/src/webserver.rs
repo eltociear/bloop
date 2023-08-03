@@ -1,46 +1,47 @@
-use crate::{env::Feature, snippet, Application};
+use crate::{env::Feature, Application};
 
-use axum::middleware;
-use axum::{http::StatusCode, response::IntoResponse, routing::get, Extension, Json};
-use std::sync::Arc;
+use axum::{
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post},
+    Extension, Json,
+};
 use std::{borrow::Cow, net::SocketAddr};
 use tower::Service;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::{catch_panic::CatchPanicLayer, cors::CorsLayer};
 use tracing::info;
-use utoipa::OpenApi;
-use utoipa::ToSchema;
 
 mod aaa;
 pub mod answer;
 mod autocomplete;
+mod config;
 mod file;
 mod github;
 mod hoverable;
 mod index;
 mod intelligence;
+pub mod middleware;
 mod query;
-mod repos;
+pub mod repos;
 mod semantic;
 
 pub type Router<S = Application> = axum::Router<S>;
 
 #[allow(unused)]
-pub(in crate::webserver) mod prelude {
-    pub(in crate::webserver) use super::{json, EndpointError, Error, ErrorKind, Result};
-    pub(in crate::webserver) use crate::indexes::Indexes;
-    pub(in crate::webserver) use axum::{
-        extract::Query, http::StatusCode, response::IntoResponse, Extension,
-    };
-    pub(in crate::webserver) use serde::{Deserialize, Serialize};
-    pub(in crate::webserver) use std::sync::Arc;
-    pub(in crate::webserver) use utoipa::{IntoParams, ToSchema};
+pub(crate) mod prelude {
+    pub(crate) use super::{json, EndpointError, Error, ErrorKind, Result, Router};
+    pub(crate) use crate::indexes::Indexes;
+    pub(crate) use axum::{extract::Query, http::StatusCode, response::IntoResponse, Extension};
+    pub(crate) use serde::{Deserialize, Serialize};
+    pub(crate) use std::sync::Arc;
 }
 
 pub async fn start(app: Application) -> anyhow::Result<()> {
     let bind = SocketAddr::new(app.config.host.parse()?, app.config.port);
 
     let mut api = Router::new()
+        .route("/config", get(config::get).put(config::put))
         // querying
         .route("/q", get(query::handle))
         // autocomplete
@@ -48,27 +49,28 @@ pub async fn start(app: Application) -> anyhow::Result<()> {
         // indexing
         .route("/index", get(index::handle))
         // repo management
-        .route("/repos", get(repos::available))
-        .route("/repos/index-status", get(repos::index_status))
-        .route(
-            "/repos/indexed",
-            get(repos::indexed).put(repos::set_indexed),
-        )
-        .route(
-            "/repos/indexed/*path",
-            get(repos::get_by_id).delete(repos::delete_by_id),
-        )
-        .route("/repos/sync/*path", get(repos::sync))
+        .nest("/repos", repos::router())
         // intelligence
         .route("/hoverable", get(hoverable::handle))
         .route("/token-info", get(intelligence::handle))
         // misc
-        .route("/file/*ref", get(file::handle))
-        .route("/semantic/chunks", get(semantic::raw_chunks))
+        .route("/search", get(semantic::complex_search))
+        .route("/file", get(file::handle))
+        .route("/answer", get(answer::answer))
+        .route("/answer/explain", get(answer::explain))
         .route(
-            "/answer",
-            get(answer::handle).with_state(Arc::new(answer::AnswerState::default())),
-        );
+            "/answer/conversations",
+            get(answer::conversations::list).delete(answer::conversations::delete),
+        )
+        .route(
+            "/answer/conversations/:thread_id",
+            get(answer::conversations::thread),
+        )
+        .route("/answer/vote", post(answer::vote));
+
+    if app.env.allow(Feature::AnyPathScan) {
+        api = api.route("/repos/scan", get(repos::scan_local));
+    }
 
     if app.env.allow(Feature::GithubDeviceFlow) {
         api = api
@@ -77,21 +79,19 @@ pub async fn start(app: Application) -> anyhow::Result<()> {
             .route("/remotes/github/status", get(github::status));
     }
 
-    if app.env.allow(Feature::AnyPathScan) {
-        api = api.route("/repos/scan", get(repos::scan_local));
-    }
+    api = api.route("/panic", get(|| async { panic!("dead") }));
 
     // Note: all routes above this point must be authenticated.
+    // These middlewares MUST provide the `middleware::User` extension.
     if app.env.allow(Feature::AuthorizationRequired) {
-        api = aaa::router(api, app.clone());
+        api = aaa::router(middleware::sentry_layer(api), app.clone());
+    } else {
+        api = middleware::local_user(middleware::sentry_layer(api), app.clone());
     }
 
-    api = api
-        .route("/api-doc/openapi.json", get(openapi_json::handle))
-        .route("/api-doc/openapi.yaml", get(openapi_yaml::handle))
-        .route("/health", get(health));
+    api = api.route("/health", get(health));
 
-    let api: Router<()> = api
+    let api = api
         .layer(Extension(app.indexes.clone()))
         .layer(Extension(app.semantic.clone()))
         .layer(Extension(app.clone()))
@@ -125,16 +125,16 @@ pub async fn start(app: Application) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn json<'a, T>(val: T) -> Json<Response<'a>>
+pub(crate) fn json<'a, T>(val: T) -> Json<Response<'a>>
 where
     Response<'a>: From<T>,
 {
     Json(Response::from(val))
 }
 
-type Result<T, E = Error> = std::result::Result<T, E>;
+pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-struct Error {
+pub struct Error {
     status: StatusCode,
     body: Json<Response<'static>>,
 }
@@ -205,8 +205,8 @@ impl IntoResponse for Error {
 }
 
 /// The response upon encountering an error
-#[derive(serde::Serialize, PartialEq, Eq, ToSchema, Debug)]
-struct EndpointError<'a> {
+#[derive(serde::Serialize, PartialEq, Eq, Debug)]
+pub struct EndpointError<'a> {
     /// The kind of this error
     kind: ErrorKind,
 
@@ -216,10 +216,10 @@ struct EndpointError<'a> {
 
 /// The kind of an error
 #[allow(unused)]
-#[derive(serde::Serialize, PartialEq, Eq, ToSchema, Debug)]
+#[derive(serde::Serialize, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
-enum ErrorKind {
+pub enum ErrorKind {
     User,
     Unknown,
     NotFound,
@@ -232,14 +232,14 @@ enum ErrorKind {
     Custom,
 }
 
-trait ApiResponse: erased_serde::Serialize {}
+pub(crate) trait ApiResponse: erased_serde::Serialize {}
 erased_serde::serialize_trait_object!(ApiResponse);
 
 /// Every endpoint exposes a Response type
 #[derive(serde::Serialize)]
 #[serde(untagged)]
 #[non_exhaustive]
-enum Response<'a> {
+pub(crate) enum Response<'a> {
     Ok(Box<dyn erased_serde::Serialize + Send + Sync + 'static>),
     Error(EndpointError<'a>),
 }
@@ -253,53 +253,6 @@ impl<T: ApiResponse + Send + Sync + 'static> From<T> for Response<'static> {
 impl<'a> From<EndpointError<'a>> for Response<'a> {
     fn from(value: EndpointError<'a>) -> Self {
         Self::Error(value)
-    }
-}
-
-#[derive(OpenApi)]
-#[openapi(
-    paths(query::handle, autocomplete::handle, hoverable::handle, intelligence::handle),
-    components(schemas(
-        crate::symbol::Symbol,
-        crate::text_range::TextRange,
-        crate::text_range::Point,
-        EndpointError<'_>,
-        ErrorKind,
-        autocomplete::AutocompleteResponse,
-        query::QueryResponse,
-        query::QueryResult,
-        query::RepositoryResultData,
-        query::FileResultData,
-        query::FileData,
-        query::DirectoryData,
-        hoverable::HoverableResponse,
-        intelligence::TokenInfoResponse,
-        intelligence::SymbolOccurrence,
-        snippet::SnippedFile,
-        snippet::Snippet,
-        repos::ReposResponse,
-        repos::Repo,
-        repos::SetIndexed,
-        crate::repo::Backend,
-        crate::repo::RepoRemote,
-        crate::repo::SyncStatus,
-        github::GithubResponse,
-        github::GithubCredentialStatus,
-    ))
-)]
-struct ApiDoc;
-
-pub mod openapi_json {
-    use super::*;
-    pub async fn handle() -> impl IntoResponse {
-        Json(<ApiDoc as OpenApi>::openapi())
-    }
-}
-
-pub mod openapi_yaml {
-    use super::*;
-    pub async fn handle() -> impl IntoResponse {
-        <ApiDoc as OpenApi>::openapi().to_yaml().unwrap()
     }
 }
 

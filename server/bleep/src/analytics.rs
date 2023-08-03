@@ -1,40 +1,61 @@
 use std::sync::Arc;
-use std::time::Duration;
 
-use crate::semantic::chunk::OverlapStrategy;
+use crate::{
+    repo::RepoRef,
+    state::{PersistedState, StateSource},
+};
 
-use once_cell::sync::OnceCell;
 use rudderanalytics::{
     client::RudderAnalytics,
     message::{Message, Track},
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tracing::{info, warn};
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct QueryEvent {
-    pub user_id: String,
-    pub session_id: String,
     pub query_id: uuid::Uuid,
-    pub overlap_strategy: OverlapStrategy,
-    pub stages: Vec<Stage>,
+    pub thread_id: uuid::Uuid,
+    pub repo_ref: Option<RepoRef>,
+    pub data: EventData,
 }
 
-/// Represents a single stage of the Answer API pipeline
-#[derive(Debug, serde::Serialize, Clone)]
-pub struct Stage {
-    /// The name of this stage, e.g.: "filtered semantic results"
-    pub name: &'static str,
+#[derive(Debug, Clone, Serialize)]
+pub struct EventData {
+    kind: EventKind,
+    name: String,
+    payload: Vec<(String, Value)>,
+}
 
-    /// The type of the data being serialized
-    #[serde(rename = "type")]
-    pub _type: &'static str,
+#[derive(Debug, Clone, Serialize)]
+pub enum EventKind {
+    Input,
+    Output,
+}
 
-    /// Stage payload
-    pub data: Value,
+impl EventData {
+    pub fn input_stage(name: &str) -> Self {
+        Self {
+            kind: EventKind::Input,
+            name: name.to_string(),
+            payload: Vec::new(),
+        }
+    }
 
-    /// Time taken for this stage in milliseconds
-    pub time_elapsed: Option<u128>,
+    pub fn output_stage(name: &str) -> Self {
+        Self {
+            kind: EventKind::Output,
+            name: name.to_string(),
+            payload: Vec::new(),
+        }
+    }
+
+    pub fn with_payload<T: Serialize>(mut self, name: &str, payload: T) -> Self {
+        self.payload
+            .push((name.to_string(), serde_json::to_value(payload).unwrap()));
+        self
+    }
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -44,11 +65,18 @@ pub struct PackageMetadata {
     pub git_rev: &'static str,
 }
 
-static HUB: OnceCell<Arc<RudderHub>> = OnceCell::new();
-
 pub struct RudderHub {
+    /// Rudderstack options
     options: Option<HubOptions>,
+
+    /// Rudderstack client
     client: RudderAnalytics,
+
+    /// User-specific store
+    user_store: PersistedState<scc::HashMap<String, UserState>>,
+
+    /// Device-specific unique identifier
+    device_id: PersistedState<DeviceId>,
 }
 
 #[derive(Default)]
@@ -57,80 +85,121 @@ pub struct HubOptions {
     pub package_metadata: Option<PackageMetadata>,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct DeviceId(String);
+
+/// User-specific configuration
+#[derive(Serialize, Deserialize)]
+pub struct UserState {
+    #[serde(default)]
+    pub tracking_id: String,
+}
+
 impl RudderHub {
-    pub fn new(key: String, data_plane: String) -> Arc<Self> {
+    pub fn new_with_options(
+        state: &StateSource,
+        device_id: impl Into<Option<String>>,
+        key: String,
+        data_plane: String,
+        options: impl Into<Option<HubOptions>>,
+    ) -> anyhow::Result<Arc<Self>> {
         let client = RudderAnalytics::load(key, data_plane);
-        let hub = Self {
+        Ok(Self {
             client,
-            options: None,
-        };
-        let _ = HUB.set(Arc::new(hub));
-        RudderHub::get().unwrap()
+            options: options.into(),
+            user_store: state.load_or_default("user_tracking")?,
+            device_id: state.load_state_or("device_id", device_id.into())?,
+        }
+        .into())
     }
 
-    pub fn new_with_options(key: String, data_plane: String, options: HubOptions) -> Arc<Self> {
-        let client = RudderAnalytics::load(key, data_plane);
-        let hub = Self {
-            client,
-            options: Some(options),
-        };
-        let _ = HUB.set(Arc::new(hub));
-        RudderHub::get().unwrap()
+    pub fn device_id(&self) -> String {
+        self.device_id.0.trim().to_owned()
     }
 
-    pub fn get() -> Option<Arc<Self>> {
-        HUB.get().map(Arc::clone)
+    pub fn tracking_id(&self, username: Option<&str>) -> String {
+        match username {
+            Some(username) => {
+                let id = self
+                    .user_store
+                    .entry(username.to_owned())
+                    .or_default()
+                    .get()
+                    .tracking_id
+                    .clone();
+                _ = self.user_store.store();
+                id
+            }
+            None => self.device_id(),
+        }
     }
 
-    pub fn track_query(event: QueryEvent) {
-        if let Some(hub) = Self::get() {
-            if let Some(options) = &hub.options {
-                if let Some(filter) = &options.event_filter {
-                    if let Some(ev) = (filter)(event) {
-                        if let Err(e) = hub.client.send(&Message::Track(Track {
-                            user_id: Some(ev.user_id),
-                            event: "openai query".to_owned(),
-                            properties: Some(json!({
-                                "query_id": ev.query_id,
-                                "session_id": ev.session_id,
-                                "overlap_strategy": ev.overlap_strategy,
-                                "stages": ev.stages,
-                                "package_metadata": options.package_metadata,
-                            })),
-                            ..Default::default()
-                        })) {
-                            warn!("failed to send analytics event: {:?}", e);
-                        } else {
-                            info!("sent analytics event ...");
-                        }
-                    }
+    /// Send a message, logging an error if it occurs.
+    ///
+    /// This will internally `block_in_place`.
+    pub fn send(&self, message: Message) {
+        if let Err(err) = tokio::task::block_in_place(|| self.client.send(&message)) {
+            warn!(?err, "failed to send analytics event");
+        } else {
+            info!("sent analytics event...");
+        }
+    }
+
+    pub fn track_query(&self, user: &crate::webserver::middleware::User, event: QueryEvent) {
+        if let Some(options) = &self.options {
+            if let Some(filter) = &options.event_filter {
+                if let Some(ev) = (filter)(event) {
+                    self.send(Message::Track(Track {
+                        user_id: Some(self.tracking_id(user.login())),
+                        event: "openai query".to_owned(),
+                        properties: Some(json!({
+                            "device_id": self.device_id(),
+                            "query_id": ev.query_id,
+                            "thread_id": ev.thread_id,
+                            "repo_ref": ev.repo_ref.as_ref().map(ToString::to_string),
+                            "data": ev.data,
+                            "package_metadata": options.package_metadata,
+                        })),
+                        ..Default::default()
+                    }));
                 }
             }
         }
     }
+
+    pub fn track_synced_repos(
+        &self,
+        count: usize,
+        username: Option<&str>,
+        org_name: Option<String>,
+    ) {
+        self.send(Message::Track(Track {
+            user_id: Some(self.tracking_id(username)),
+            event: "track_synced_repos".into(),
+            properties: Some(serde_json::json!({ "count": count, "org_name": org_name })),
+            ..Default::default()
+        }));
+    }
 }
 
-impl Stage {
-    pub fn new<T: serde::Serialize>(name: &'static str, data: T) -> Self {
-        let data = serde_json::to_value(data).unwrap();
-        let _type = match data {
-            Value::Null => "null",
-            Value::Bool(_) => "bool",
-            Value::Number(_) => "number",
-            Value::String(_) => "string",
-            Value::Array(_) => "array",
-            Value::Object(_) => "object",
-        };
-        Self {
-            name,
-            _type,
-            data,
-            time_elapsed: None,
+impl From<Option<String>> for DeviceId {
+    fn from(value: Option<String>) -> Self {
+        match value {
+            Some(val) => DeviceId(val),
+            None => Self::default(),
         }
     }
+}
 
-    pub fn with_time(mut self, time_elapsed: Duration) -> Self {
-        self.time_elapsed = Some(time_elapsed.as_millis());
-        self
+impl Default for DeviceId {
+    fn default() -> Self {
+        Self(uuid::Uuid::new_v4().to_string())
+    }
+}
+
+impl Default for UserState {
+    fn default() -> Self {
+        let tracking_id = uuid::Uuid::new_v4().to_string();
+        Self { tracking_id }
     }
 }

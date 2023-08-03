@@ -39,3 +39,13 @@ Alternatively, to run the app in dev mode:
 ```
 npm run start-app
 ```
+
+## Wiping an index
+
+Deleting and re-indexing the bloop index can fix corruption issues. bloop's index is stored:
+
+| OS      | Index Path |
+| ----------- | ----------- |
+| MacOS      | `~/Library/Application\ Support/ai.bloop.bloop`       |
+| Windows   | `%APPDATA%/bloop`        |
+| Linux   | `~/.local/share/bloop`        |

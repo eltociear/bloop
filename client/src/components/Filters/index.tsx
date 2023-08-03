@@ -1,6 +1,7 @@
 import { useCallback, useContext, useEffect, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import isEqual from 'lodash.isequal';
+import { Trans, useTranslation } from 'react-i18next';
 import Button from '../Button';
 import {
   ChevronFoldIn,
@@ -13,25 +14,20 @@ import {
   FILTER_TEXT_ANIMATION,
   FILTER_PARENT_ANIMATION,
 } from '../../consts/animations';
-import { saveJsonToStorage, SEARCH_HISTORY_KEY } from '../../services/storage';
 import useAppNavigation from '../../hooks/useAppNavigation';
+import { UIContext } from '../../context/uiContext';
 import FilterSection from './FilterSection';
 
 type Props = {
-  isOpen: boolean;
-  toggleOpen: () => void;
   showHeader?: boolean;
+  forceOpen?: boolean;
 };
 
-const Filters = ({ isOpen, toggleOpen, showHeader = true }: Props) => {
-  const {
-    filters,
-    setFilters,
-    inputValue,
-    setInputValue,
-    setSearchHistory,
-    searchType,
-  } = useContext(SearchContext);
+const Filters = ({ showHeader = true, forceOpen }: Props) => {
+  const { t } = useTranslation();
+  const { filters, setFilters } = useContext(SearchContext.Filters);
+  const { inputValue, setInputValue } = useContext(SearchContext.InputValue);
+  const { isFiltersOpen, setFiltersOpen } = useContext(UIContext.Filters);
   const [openSections, setOpenSections] = useState<string[]>([]);
   const [newFilters, setNewFilters] = useState(filters);
   const [hasFiltersChanged, setFiltersChanged] = useState(false);
@@ -79,13 +75,8 @@ const Filters = ({ isOpen, toggleOpen, showHeader = true }: Props) => {
     }
 
     setFilters(newFilters);
-    navigateSearch(result, searchType);
-    setSearchHistory((prev) => {
-      const newHistory = [result, ...prev].slice(0, 4);
-      saveJsonToStorage(SEARCH_HISTORY_KEY, newHistory);
-      return newHistory;
-    });
-  }, [newFilters, searchType]);
+    navigateSearch(result);
+  }, [newFilters]);
 
   const handleFiltersChange = useCallback(
     (s: number, i: number, b: boolean) => {
@@ -130,8 +121,8 @@ const Filters = ({ isOpen, toggleOpen, showHeader = true }: Props) => {
 
   return (
     <motion.div
-      className={`text-gray-300 border-r border-gray-800  flex-shrink-0 select-none overflow-x-hidden relative`}
-      animate={{ width: isOpen ? '20.25rem' : '5rem' }}
+      className={`bg-bg-base border-r border-bg-border flex-shrink-0 select-none overflow-x-hidden relative h-full`}
+      animate={{ width: isFiltersOpen || forceOpen ? '20.25rem' : '5rem' }}
       transition={FILTER_PARENT_ANIMATION}
     >
       <div
@@ -139,13 +130,15 @@ const Filters = ({ isOpen, toggleOpen, showHeader = true }: Props) => {
       >
         {showHeader && (
           <div
-            className={`px-8 subhead-m py-6 border-b border-gray-800 flex items-center justify-between ${
-              isOpen ? 'px-8' : 'px-6'
+            className={`px-8 subhead-m py-6 border-b border-bg-border flex items-center justify-between ${
+              isFiltersOpen || forceOpen ? 'px-8' : 'px-6'
             }`}
           >
-            <span className={isOpen ? '' : 'hidden'}>Filters</span>
+            <span className={isFiltersOpen || forceOpen ? '' : 'hidden'}>
+              <Trans>Filters</Trans>
+            </span>
             <div className="flex items-center gap-2 caption-strong">
-              {isOpen && (
+              {(isFiltersOpen || forceOpen) && (
                 <Button
                   variant="tertiary"
                   size="small"
@@ -153,7 +146,9 @@ const Filters = ({ isOpen, toggleOpen, showHeader = true }: Props) => {
                   onClick={() => {
                     setOpenSections(allOpen ? [] : Object.keys(newFilters));
                   }}
-                  title={allOpen ? 'Fold everything' : 'Expand everything'}
+                  title={
+                    allOpen ? t('Fold everything') : t('Expand everything')
+                  }
                 >
                   {allOpen ? <ChevronFoldIn /> : <ChevronFoldOut />}
                 </Button>
@@ -162,51 +157,61 @@ const Filters = ({ isOpen, toggleOpen, showHeader = true }: Props) => {
                 variant="secondary"
                 size="small"
                 onClick={onReset}
-                className={isOpen ? '' : 'hidden'}
+                className={isFiltersOpen || forceOpen ? '' : 'hidden'}
               >
-                Reset filters
+                <Trans>Reset filters</Trans>
               </Button>
               <Button
                 variant="tertiary"
                 size="small"
                 onlyIcon
-                onClick={toggleOpen}
-                title={isOpen ? 'Hide filters' : 'Show filters'}
+                onClick={() => setFiltersOpen((prev) => !prev)}
+                title={
+                  isFiltersOpen || forceOpen
+                    ? t('Hide filters')
+                    : t('Show filters')
+                }
               >
-                {isOpen ? <DoubleChevronLeft /> : <DoubleChevronRight />}
+                {isFiltersOpen || forceOpen ? (
+                  <DoubleChevronLeft />
+                ) : (
+                  <DoubleChevronRight />
+                )}
               </Button>
             </div>
           </div>
         )}
         <AnimatePresence>
-          {isOpen && (
+          {(isFiltersOpen || forceOpen) && (
             <motion.div
               className={`w-full`}
               animate={{ visibility: 'visible' }}
               exit={{ visibility: 'hidden' }}
               transition={FILTER_TEXT_ANIMATION}
             >
-              {newFilters.map((s, index) => (
-                <FilterSection
-                  key={s.name}
-                  items={s.items}
-                  type={s.type}
-                  onChange={(i, b) => handleFiltersChange(index, i, b)}
-                  name={s.name}
-                  title={s.title}
-                  singleSelect={s.singleSelect}
-                  open={openSections.includes(index.toString())}
-                  onToggle={() => {
-                    const newOpenSection = openSections.includes(
-                      index.toString(),
-                    )
-                      ? openSections.filter((s) => s !== index.toString())
-                      : openSections.concat(index.toString());
-                    setOpenSections(newOpenSection);
-                  }}
-                  onSelectAll={(b) => handleFiltersAllSelected(index, b)}
-                />
-              ))}
+              {newFilters
+                .filter((s) => s.title !== 'Repository')
+                .map((s, index) => (
+                  <FilterSection
+                    key={s.name}
+                    items={s.items}
+                    type={s.type}
+                    onChange={(i, b) => handleFiltersChange(index, i, b)}
+                    name={s.name}
+                    title={s.title}
+                    singleSelect={s.singleSelect}
+                    open={openSections.includes(index.toString())}
+                    onToggle={() => {
+                      const newOpenSection = openSections.includes(
+                        index.toString(),
+                      )
+                        ? openSections.filter((s) => s !== index.toString())
+                        : openSections.concat(index.toString());
+                      setOpenSections(newOpenSection);
+                    }}
+                    onSelectAll={(b) => handleFiltersAllSelected(index, b)}
+                  />
+                ))}
             </motion.div>
           )}
         </AnimatePresence>
@@ -220,7 +225,7 @@ const Filters = ({ isOpen, toggleOpen, showHeader = true }: Props) => {
             animate={{ height: 46 }}
           >
             <Button onClick={handleSubmit} size="large">
-              Apply filters
+              <Trans>Apply filters</Trans>
             </Button>
           </motion.div>
         )}

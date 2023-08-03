@@ -1,16 +1,14 @@
-import { createContext } from 'react';
+import { createContext, Dispatch, SetStateAction } from 'react';
 import { RepoType } from '../types/general';
 
 type ContextType = {
   repositories?: RepoType[];
-  setRepositories: (r: RepoType[]) => void;
-  localSyncError: boolean;
-  githubSyncError: boolean;
+  setRepositories: Dispatch<SetStateAction<RepoType[] | undefined>>;
+  fetchRepos: () => void;
 };
 
 export const RepositoriesContext = createContext<ContextType>({
   repositories: [],
   setRepositories: () => {},
-  localSyncError: false,
-  githubSyncError: false,
+  fetchRepos: () => {},
 });

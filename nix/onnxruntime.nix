@@ -83,10 +83,6 @@ stdenv.mkDerivation rec {
 
   checkInputs = [ ];
 
-  # TODO: build server, and move .so's to lib output
-  # Python's wheel is stored in a separate dist output
-  outputs = [ "out" "dev" ];
-
   enableParallelBuilding = true;
 
   cmakeDir = "../cmake";
@@ -127,8 +123,12 @@ stdenv.mkDerivation rec {
 
   postBuild = null;
 
-  installPhase = ''
-    find .. \( -name \*.a -o -name \*.so -o -name \*.dylib \) -exec cp --parents \{\} $out/lib \;
+  postInstall = ''
+    # perform parts of `tools/ci_build/github/linux/copy_strip_binary.sh`
+    install -m644 -Dt $out/include \
+      ../include/onnxruntime/core/framework/provider_options.h \
+      ../include/onnxruntime/core/providers/cpu/cpu_provider_factory.h \
+      ../include/onnxruntime/core/session/onnxruntime_*.h
   '';
 
   passthru = { protobuf = pkgs.protobuf; };

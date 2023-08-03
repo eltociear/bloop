@@ -1,51 +1,60 @@
 {
   description = "bloop";
 
+  # nixConfig = {
+  #   extra-substituters = "https://bloopai.cachix.org";
+  #   extra-trusted-public-keys =
+  #     "bloopai.cachix.org-1:uSHFor+Jd3znikUnLc58xnHBXTcuIBSjdJxV5rLIMJU=";
+  # };
+
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-
-    rust-overlay = {
-      url = "github:oxalica/rust-overlay";
-      inputs.flake-utils.follows = "flake-utils";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
   };
 
-  outputs = { self, nixpkgs, flake-utils, rust-overlay }:
+  outputs = { self, nixpkgs, flake-utils }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        overlays = [ (import rust-overlay) ];
-        pkgs = import nixpkgs { inherit system overlays; };
+        pkgs = import nixpkgs { inherit system; };
         pkgsStatic = pkgs.pkgsStatic;
         lib = pkgs.lib;
 
         llvm = pkgs.llvmPackages_14;
         clang = llvm.clang;
         libclang = llvm.libclang;
-        stdenv = llvm.stdenv;
+        stdenv = if pkgs.stdenv.isLinux then
+          pkgs.stdenvAdapters.useMoldLinker llvm.stdenv
+        else
+          llvm.stdenv;
 
-        rust = pkgs.rust-bin.stable.latest.default;
+        mkShell = if stdenv.isLinux then
+          pkgs.mkShell.override { inherit stdenv; }
+        else
+          pkgs.mkShell;
+
         rustPlatform = pkgs.makeRustPlatform {
-          cargo = rust;
-          rustc = rust;
+          cargo = pkgs.cargo;
+          rustc = pkgs.rustc;
         };
 
-        runtimeDeps =
-          with pkgs; ([ openssl_1_1.out rocksdb universal-ctags git zlib ]);
+        runtimeDeps = with pkgs;
+          ([ openssl.out rocksdb git zlib nsync onnxruntime14 ]
+            ++ lib.optionals stdenv.isDarwin [
+              darwin.apple_sdk.frameworks.Foundation
+              darwin.apple_sdk.frameworks.CoreFoundation
+              darwin.apple_sdk.frameworks.Security
+            ]);
 
         buildDeps = with pkgs;
           ([
             stdenv.cc.cc.lib
             glib.dev
             pkg-config
-            openssl_1_1.out
-            openssl_1_1.dev
-
-            rust
+            openssl.out
+            openssl.dev
+            llvm.bintools
 
             protobuf
-            onnxruntime-static
           ] ++ lib.optionals stdenv.isDarwin [
             darwin.apple_sdk.frameworks.Foundation
             darwin.apple_sdk.frameworks.CoreFoundation
@@ -53,7 +62,9 @@
           ]);
 
         guiDeps = with pkgs;
-          [ nodePackages.pnpm ] ++ (lib.optionals stdenv.isLinux [
+          [ nodePackages.npm nodejs ] ++ (lib.optionals stdenv.isLinux [
+            gdk-pixbuf
+            gdk-pixbuf.dev
             zlib.dev
             dbus.dev
             libsoup.dev
@@ -62,23 +73,82 @@
             dmidecode
             appimage-run
             appimagekit
+            gdk-pixbuf
           ] ++ lib.optionals stdenv.isDarwin [
             darwin.apple_sdk.frameworks.Carbon
             darwin.apple_sdk.frameworks.WebKit
             darwin.apple_sdk.frameworks.AppKit
           ]);
 
+        onnxruntime_lib = if stdenv.isDarwin then
+          "libonnxruntime.dylib"
+        else
+          "libonnxruntime.so";
+
         envVars = {
           LIBCLANG_PATH = "${libclang.lib}/lib";
           ROCKSDB_LIB_DIR = "${pkgs.rocksdb}/lib";
           ROCKSDB_INCLUDE_DIR = "${pkgs.rocksdb}/include";
-          OPENSSL_LIB_DIR = "${pkgs.openssl_1_1.out}/lib";
-          OPENSSL_INCLUDE_DIR = "${pkgs.openssl_1_1.dev}/include";
+          OPENSSL_LIB_DIR = "${pkgs.openssl.out}/lib";
+          OPENSSL_INCLUDE_DIR = "${pkgs.openssl.dev}/include";
           OPENSSL_NO_VENDOR = "1";
-          ORT_LIB_LOCATION = "${onnxruntime-static}/build";
+          ORT_STRATEGY = "system";
+          ORT_LIB_LOCATION = "${onnxruntime14}/lib";
+          ORT_DYLIB_PATH = "${onnxruntime14}/lib/${onnxruntime_lib}";
+        } // lib.optionalAttrs stdenv.isLinux {
+          RUSTFLAGS = "-C link-arg=-fuse-ld=mold";
         };
 
-        bleep = (rustPlatform.buildRustPackage {
+        bleep =
+          (rustPlatform.buildRustPackage.override { inherit stdenv; } rec {
+            meta = with pkgs.lib; {
+              description = "Search code. Fast.";
+              homepage = "https://bloop.ai";
+              license = licenses.asl20;
+              platforms = platforms.all;
+            };
+
+            name = "bleep";
+            pname = name;
+            src = pkgs.lib.sources.cleanSource ./.;
+
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+              outputHashes = {
+                "hyperpolyglot-0.1.7" =
+                  "sha256-JY75NB6sPxN0p/hksnBbat4S2EYFi2nExYoVHpYoib8=";
+                "tree-sitter-cpp-0.20.0" =
+                  "sha256-h6mJdmQzJlxYIcY+d5IiaFghraUgBGZwqFPKwB3E4pQ=";
+                "tree-sitter-go-0.19.1" =
+                  "sha256-f885YTswEDH/QfRPUxcLp/1E2zXLKl25R9IyTGKb1eM=";
+                "tree-sitter-java-0.20.0" =
+                  "sha256-gQzoWGV9wYiLibMFkLoY2sdEJg+ae9NnHt/GFfFzP8U=";
+                "ort-1.14.8" =
+                  "sha256-6YAhbrgI95WwRV0ngS0yaYlxfDGUFXYU0/oGf6vs68M=";
+                "comrak-0.18.0" =
+                  "sha256-UWY00jF2aKAG3Oz0P1UWF/7TiTIrCUGHwfjW+O1ok7Q=";
+                "tree-sitter-php-0.19.1" =
+                  "sha256-oHUfcuqtFFl+70/uJjE74J1JVV93G9++UaEIntOH5tM=";
+              };
+            };
+
+            buildNoDefaultFeatures = true;
+            checkNoDefaultFeatures = true;
+            cargoTestFlags = "-p ${name}";
+            cargoBuildFlags = "-p ${name}";
+
+            nativeCheckInputs = buildDeps;
+            nativeBuildInputs = buildDeps;
+            checkInputs = runtimeDeps;
+            buildInputs = runtimeDeps;
+          }).overrideAttrs (old: envVars);
+
+        onnxruntime14 = import ./nix/onnxruntime.nix {
+          inherit pkgs;
+          inherit (llvm) stdenv;
+        };
+
+        frontend = (pkgs.buildNpmPackage rec {
           meta = with pkgs.lib; {
             description = "Search code. Fast.";
             homepage = "https://bloop.ai";
@@ -86,45 +156,27 @@
             platforms = platforms.all;
           };
 
-          name = "bleep";
-          pname = "bleep";
+          name = "bleep-frontend";
+          pname = name;
           src = pkgs.lib.sources.cleanSource ./.;
 
-          buildFeatures = [ "dynamic-ort" ];
-
-          cargoBuildFlags = "-p bleep";
-          doCheck = false;
-
-          cargoLock = {
-            lockFile = ./Cargo.lock;
-            outputHashes = {
-              "hyperpolyglot-0.1.7" =
-                "sha256-NftH6P+DmT2hggFxpBmvyekA/lv/JhbCJY8iMABhHp8=";
-              "octocrab-0.17.0" =
-                "sha256-UoHqwsOhfx5VBrK6z94Jk5aKpCxswcSBhiCNZAyq5a8=";
-              "tree-sitter-cpp-0.20.0" =
-                "sha256-h6mJdmQzJlxYIcY+d5IiaFghraUgBGZwqFPKwB3E4pQ=";
-              "tree-sitter-go-0.19.1" =
-                "sha256-f885YTswEDH/QfRPUxcLp/1E2zXLKl25R9IyTGKb1eM=";
-              "tree-sitter-java-0.20.0" =
-                "sha256-gQzoWGV9wYiLibMFkLoY2sdEJg+ae9NnHt/GFfFzP8U=";
-              "ort-1.14.0-beta.0" =
-                "sha256-GLwCOtYOvJWg/tBAuqVqwREaxlxAhL1FJltwF+fWROk=";
-            };
-          };
-
-          nativeBuildInputs = buildDeps;
-          buildInputs = runtimeDeps;
-        }).overrideAttrs (old: envVars);
-
-        onnxruntime-static =
-          import ./nix/onnxruntime.nix { inherit pkgs stdenv; };
+          # The prepack script runs the build script, which we'd rather do in the build phase.
+          npmPackFlags = [ "--ignore-scripts" ];
+          npmDepsHash = "sha256-YvmdThbqlmQ9MXL+a7eyXJ33sQNStQah9MUW2zhc/Uc=";
+          makeCacheWritable = true;
+          npmBuildScript = "build-web";
+          installPhase = ''
+            mkdir -p $out
+            cp -r client/dist $out/dist
+          '';
+        });
 
       in {
         packages = {
-          bleep = bleep;
-
           default = bleep;
+
+          frontend = frontend;
+          bleep = bleep;
           docker = pkgs.dockerTools.buildImage {
             name = "bleep";
             config = { Cmd = [ "${bleep}/bin/bleep" ]; };
@@ -134,28 +186,28 @@
 
           };
 
-          ctags-static = pkgsStatic.universal-ctags.overrideAttrs (old: {
-            nativeBuildInputs = with pkgs; [ autoreconfHook perl pkg-config ];
-            doCheck = false;
-            checkFlags = [ ];
-          });
-
-          ctags-static-aarch64-darwin =
-            pkgs.pkgsCross.aarch64-darwin.pkgsStatic.universal-ctags.overrideAttrs
-            (old: {
-              nativeBuildInputs = with pkgs; [ autoreconfHook perl pkg-config ];
-              doCheck = false;
-              checkFlags = [ ];
-            });
-
-          onnxruntime-static = onnxruntime-static;
+          onnxruntime14 = onnxruntime14;
         };
 
-        devShell = (pkgs.mkShell {
-          buildInputs = buildDeps ++ runtimeDeps ++ guiDeps
-            ++ (with pkgs; [ git-lfs ]);
-        }).overrideAttrs (old: envVars);
+        devShells = {
+          default = (mkShell {
+            buildInputs = buildDeps ++ runtimeDeps ++ guiDeps ++ (with pkgs; [
+              git-lfs
+              rustfmt
+              clippy
+              rust-analyzer
+              cargo
+              rustc
+              cargo-watch
+            ]);
 
+            src = pkgs.lib.sources.cleanSource ./.;
+
+            BLOOP_LOG = "bleep=debug";
+          }).overrideAttrs (old: envVars);
+        };
+
+        formatter = pkgs.nixfmt;
       });
 }
 

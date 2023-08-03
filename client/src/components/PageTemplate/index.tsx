@@ -1,82 +1,44 @@
-import React, { useCallback, useContext, useEffect, useState } from 'react';
+import React, { PropsWithChildren, useMemo } from 'react';
+import * as Sentry from '@sentry/react';
 import NavBar from '../NavBar';
 import StatusBar from '../StatusBar';
-import { DeviceContext } from '../../context/deviceContext';
-import { AnalyticsContext } from '../../context/analyticsContext';
-import { UIContext } from '../../context/uiContext';
-import { STEP_KEY } from '../../pages/Home/Onboarding/RemoteServicesStep';
-import GithubConnectStep from '../../pages/Home/Onboarding/GithubConnectStep';
-import SeparateOnboardingStep from '../SeparateOnboardingStep';
-import {
-  IS_ANALYTICS_ALLOWED_KEY,
-  savePlainToStorage,
-} from '../../services/storage';
-import Button from '../Button';
+import Chat from '../Chat';
+import ErrorFallback from '../ErrorFallback';
+import { RenderPage } from '../../pages';
+import LeftSidebar from '../LeftSidebar';
+import Subheader from './Subheader';
 
 type Props = {
-  children: React.ReactNode;
+  renderPage: RenderPage;
 };
 
-const mainContainerStyle = { height: 'calc(100vh - 8rem)' };
-const PageTemplate = ({ children }: Props) => {
-  const { isSelfServe } = useContext(DeviceContext);
-  const { isAnalyticsAllowed, setIsAnalyticsAllowed } =
-    useContext(AnalyticsContext);
-  const { isGithubConnected, setOnBoardingState, isGithubChecked } =
-    useContext(UIContext);
-  const [isModalOpen, setModalOpen] = useState(false);
-
-  useEffect(() => {
-    if (
-      isGithubChecked &&
-      !isGithubConnected &&
-      isAnalyticsAllowed &&
-      !isSelfServe
-    ) {
-      setModalOpen(true);
-    }
-  }, [isGithubChecked]);
-
-  const saveOptIn = useCallback((optIn: boolean) => {
-    savePlainToStorage(IS_ANALYTICS_ALLOWED_KEY, optIn ? 'true' : 'false');
-    setOnBoardingState((prev) => ({
-      ...prev,
-      [STEP_KEY]: { hasOptedIn: optIn },
-    }));
-    setIsAnalyticsAllowed(optIn);
-  }, []);
+const PageTemplate = ({ children, renderPage }: PropsWithChildren<Props>) => {
+  const mainContainerStyle = useMemo(
+    () => ({
+      height: `calc(100vh - ${renderPage !== 'home' ? '9.5rem' : '6rem'})`,
+    }),
+    [renderPage],
+  );
 
   return (
-    <div className="text-gray-200">
-      <SeparateOnboardingStep isVisible={isModalOpen} top={'5rem'}>
-        <GithubConnectStep
-          handleNext={() => {
-            setModalOpen(false);
-            saveOptIn(true);
-          }}
-          description="We detected an issue with your GitHub credentials, please re-authenticate with GitHub again to enable remote services. Remote services are required to use natural language search. Opting out will disable natural language search."
-          secondaryCTA={
-            <Button
-              onClick={() => {
-                setModalOpen(false);
-                saveOptIn(false);
-              }}
-              variant="secondary"
-            >
-              Opt-Out of Remote Services
-            </Button>
-          }
-        />
-      </SeparateOnboardingStep>
-      <NavBar userSigned />
+    <div className="text-label-title">
+      <NavBar />
+      <div className="mt-8" />
+      {renderPage !== 'home' && <Subheader />}
       <div
-        className="flex my-16 w-screen overflow-hidden relative z-10"
+        className="flex mb-16 w-screen overflow-hidden relative"
         style={mainContainerStyle}
       >
+        {renderPage !== 'article-response' &&
+          renderPage !== 'repo' &&
+          renderPage !== 'home' && <LeftSidebar renderPage={renderPage} />}
         {children}
+        {renderPage !== 'home' && <Chat />}
       </div>
       <StatusBar />
     </div>
   );
 };
-export default PageTemplate;
+export default Sentry.withErrorBoundary(PageTemplate, {
+  fallback: (props) => <ErrorFallback {...props} />,
+});

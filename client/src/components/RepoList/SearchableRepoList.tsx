@@ -1,37 +1,31 @@
-import React, {
-  ChangeEvent,
-  Dispatch,
-  SetStateAction,
-  useCallback,
-  useState,
-} from 'react';
-import Tabs from '../Tabs';
-import { RepoUi } from '../../types/general';
+import React, { ChangeEvent, useCallback, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { MenuItemType, RepoUi } from '../../types/general';
 import TextInput from '../TextInput';
+import { DropdownWithIcon } from '../Dropdown';
+import { Clock, SortAlphabetical } from '../../icons';
 import RepoList from './index';
 
 type Props = {
-  readOnly?: boolean;
-  activeTab: number;
-  setActiveTab?: (t: number) => void;
+  isLoading?: boolean;
   repos: RepoUi[];
-  setRepos: Dispatch<SetStateAction<RepoUi[]>>;
   containerClassName?: string;
   source: 'local' | 'GitHub';
+  onSync?: () => void;
+  onFolderChange?: () => void;
 };
 
-const tabs = [{ title: 'Sync all repos' }, { title: 'Sync selected repos' }];
-
 const SearchableRepoList = ({
-  readOnly,
-  activeTab,
-  setActiveTab,
   repos,
-  setRepos,
+  isLoading,
   containerClassName,
   source,
+  onSync,
+  onFolderChange,
 }: Props) => {
+  const { t } = useTranslation();
   const [filter, setFilter] = useState('');
+  const [sortBy, setSortBy] = useState<'name' | 'last_updated'>('name');
 
   const handleChange = useCallback((e: ChangeEvent<HTMLInputElement>) => {
     setFilter(e.target.value);
@@ -39,34 +33,51 @@ const SearchableRepoList = ({
 
   return (
     <div
-      className={`flex flex-col overflow-auto gap-3 ${
-        containerClassName || ''
-      }`}
+      className={`flex flex-col overflow-auto gap-8 ${
+        repos.filter((r) => r.name.includes(filter)).length > 3
+          ? 'fade-bottom'
+          : ''
+      } ${containerClassName || ''}`}
     >
-      <TextInput
-        type="search"
-        value={filter}
-        name="filter"
-        onChange={handleChange}
-        placeholder="Search..."
-      />
-      {!readOnly && (
-        <div className="overflow-hidden flex-shrink-0">
-          <Tabs
-            activeTab={activeTab}
-            onTabChange={setActiveTab}
-            tabs={tabs}
-            variant="button"
-            fullWidth
+      <div className="flex items-center gap-1">
+        <TextInput
+          type="search"
+          value={filter}
+          name="filter"
+          onChange={handleChange}
+          placeholder={t('Search repository...')}
+          variant="filled"
+        />
+        {source !== 'local' && (
+          <DropdownWithIcon
+            btnVariant="secondary"
+            items={[
+              {
+                type: MenuItemType.DEFAULT,
+                text: t('Alphabetically'),
+                icon: <SortAlphabetical />,
+                onClick: () => setSortBy('name'),
+              },
+              {
+                type: MenuItemType.DEFAULT,
+                text: t('Last updated'),
+                icon: <Clock />,
+                onClick: () => setSortBy('last_updated'),
+              },
+            ]}
+            icon={sortBy === 'name' ? <SortAlphabetical /> : <Clock />}
+            size="small"
           />
-        </div>
-      )}
+        )}
+      </div>
       <RepoList
         repos={repos}
-        setRepos={setRepos}
         source={source}
-        activeTab={activeTab}
         filter={filter}
+        sortBy={sortBy}
+        isLoading={isLoading}
+        onSync={onSync}
+        onFolderChange={onFolderChange}
       />
     </div>
   );

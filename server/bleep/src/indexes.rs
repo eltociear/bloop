@@ -14,19 +14,23 @@ use tokio::sync::RwLock;
 pub mod file;
 pub mod reader;
 pub mod repo;
+mod schema;
 
 pub use file::File;
 pub use repo::Repo;
 use tracing::debug;
 
 use crate::{
+    background::{SyncHandle, SyncPipes},
+    cache::FileCache,
+    db::SqlDb,
     query::parser::Query,
-    repo::{RepoMetadata, RepoRef, Repository},
+    repo::{RepoError, RepoMetadata, RepoRef, Repository},
     semantic::Semantic,
+    state::RepositoryPool,
     Configuration,
 };
 
-pub type Progress = (RepoRef, usize, u8);
 pub type GlobalWriteHandleRef<'a> = [IndexWriteHandle<'a>];
 
 pub struct GlobalWriteHandle<'a> {
@@ -43,19 +47,37 @@ impl<'a> Deref for GlobalWriteHandle<'a> {
 }
 
 impl<'a> GlobalWriteHandle<'a> {
-    pub fn rollback(self) -> Result<()> {
+    pub(crate) fn rollback(self) -> Result<()> {
         for mut handle in self.handles {
             handle.rollback()?
         }
 
         Ok(())
     }
-    pub async fn commit(self) -> Result<()> {
+
+    pub(crate) async fn commit(self) -> Result<()> {
         for mut handle in self.handles {
             handle.commit().await?
         }
 
         Ok(())
+    }
+
+    pub(crate) async fn index(
+        &self,
+        sync_handle: &SyncHandle,
+        repo: &Repository,
+    ) -> Result<Arc<RepoMetadata>, RepoError> {
+        let metadata = repo.get_repo_metadata().await;
+
+        futures::future::join_all(self.handles.iter().map(|handle| {
+            handle.index(&sync_handle.reporef, repo, &metadata, sync_handle.pipes())
+        }))
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(metadata)
     }
 }
 
@@ -63,19 +85,33 @@ pub struct Indexes {
     pub repo: Indexer<Repo>,
     pub file: Indexer<File>,
     write_mutex: tokio::sync::Mutex<()>,
-
-    progress: tokio::sync::broadcast::Sender<Progress>,
 }
 
 impl Indexes {
-    pub fn new(config: Arc<Configuration>, semantic: Option<Semantic>) -> Result<Self> {
+    pub async fn new(
+        repo_pool: RepositoryPool,
+        config: Arc<Configuration>,
+        sql: SqlDb,
+        semantic: Option<Semantic>,
+    ) -> Result<Self> {
         if config.source.index_version_mismatch() {
+            // we don't support old schemas, and tantivy will hard
+            // error if we try to open a db with a different schema.
             std::fs::remove_dir_all(config.index_path("repo"))?;
             std::fs::remove_dir_all(config.index_path("content"))?;
-            config.source.save_index_version()?;
-        }
 
-        let (progress, _) = tokio::sync::broadcast::channel(16);
+            let mut refs = vec![];
+            // knocking out our current file caches will force re-indexing qdrant
+            repo_pool.for_each(|reporef, repo| {
+                refs.push(reporef.to_owned());
+                repo.last_index_unix_secs = 0;
+            });
+
+            for reporef in refs {
+                FileCache::for_repo(&sql, &reporef).delete().await?;
+            }
+        }
+        config.source.save_index_version()?;
 
         Ok(Self {
             repo: Indexer::create(
@@ -85,13 +121,12 @@ impl Indexes {
                 config.max_threads,
             )?,
             file: Indexer::create(
-                File::new(config.clone(), semantic),
+                File::new(sql, semantic),
                 config.index_path("content").as_ref(),
                 config.buffer_size,
                 config.max_threads,
             )?,
             write_mutex: Default::default(),
-            progress,
         })
     }
 
@@ -102,28 +137,22 @@ impl Indexes {
         debug!(id, "lock acquired");
 
         Ok(GlobalWriteHandle {
-            handles: vec![
-                self.repo.write_handle(0, self.progress.clone())?,
-                self.file.write_handle(1, self.progress.clone())?,
-            ],
+            handles: vec![self.repo.write_handle()?, self.file.write_handle()?],
             _write_lock,
         })
     }
-
-    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Progress> {
-        self.progress.subscribe()
-    }
 }
 
+#[async_trait]
 pub trait Indexable: Send + Sync {
     /// This is where files are scanned and indexed.
-    fn index_repository(
+    async fn index_repository(
         &self,
         reporef: &RepoRef,
         repo: &Repository,
         metadata: &RepoMetadata,
         writer: &IndexWriter,
-        progress: &(dyn Fn(u8) + Sync),
+        pipes: &SyncPipes,
     ) -> Result<()>;
 
     fn delete_by_repo(&self, writer: &IndexWriter, repo: &Repository);
@@ -159,7 +188,6 @@ pub struct IndexWriteHandle<'a> {
     index: &'a tantivy::Index,
     reader: &'a RwLock<IndexReader>,
     writer: IndexWriter,
-    progress: Box<dyn Fn(RepoRef, u8) + Send + Sync>,
 }
 
 impl<'a> IndexWriteHandle<'a> {
@@ -172,16 +200,16 @@ impl<'a> IndexWriteHandle<'a> {
         self.source.delete_by_repo(&self.writer, repo)
     }
 
-    pub fn index(
+    pub async fn index(
         &self,
         reporef: &RepoRef,
         repo: &Repository,
         metadata: &RepoMetadata,
+        progress: &SyncPipes,
     ) -> Result<()> {
         self.source
-            .index_repository(reporef, repo, metadata, &self.writer, &|p: u8| {
-                (self.progress)(reporef.clone(), p)
-            })
+            .index_repository(reporef, repo, metadata, &self.writer, progress)
+            .await
     }
 
     pub async fn commit(&mut self) -> Result<()> {
@@ -209,11 +237,7 @@ pub struct Indexer<T> {
 }
 
 impl<T: Indexable> Indexer<T> {
-    fn write_handle(
-        &self,
-        id: usize,
-        progress: tokio::sync::broadcast::Sender<Progress>,
-    ) -> Result<IndexWriteHandle<'_>> {
+    fn write_handle(&self) -> Result<IndexWriteHandle<'_>> {
         Ok(IndexWriteHandle {
             source: &self.source,
             index: &self.index,
@@ -221,9 +245,6 @@ impl<T: Indexable> Indexer<T> {
             writer: self
                 .index
                 .writer_with_num_threads(self.reindex_threads, self.reindex_buffer_size)?,
-            progress: Box::new(move |reporef, status| {
-                _ = progress.send((reporef, id, status));
-            }),
         })
     }
 

@@ -15,9 +15,9 @@ type Props = {
 };
 
 const defaultState =
-  'text-gray-100 border border-transparent hover:border-gray-600 active:border-gray-600 focus:order-gray-600 drop-shadow-light hover:drop-shadow-none';
+  'text-label-base border border-transparent hover:border-bg-border-hover focus:border-bg-border-hover hover:text-label-title focus:text-label-title ';
 const selectedState =
-  'text-sky-500 hover:text-sky-400 bg-gray-900 border border-transparent ';
+  'text-bg-main hover:text-bg-main-hover bg-bg-base-hover border border-bg-border-hover';
 
 const sizeMap = {
   small: {
@@ -54,10 +54,10 @@ const Button = ({
       className={`py-0 rounded-4 focus:outline-none outline-none outline-0 flex items-center flex-grow-0 flex-shrink-0 
        ${selected ? selectedState : defaultState}
        ${onlyIcon ? sizeMap[size].square : sizeMap[size].default} ${
-        className || ''
-      } ${
-        onlyIcon ? '' : 'min-w-[84px] justify-center'
-      } transition-all duration-300 ease-in-bounce`}
+         className || ''
+       } ${
+         onlyIcon ? '' : 'min-w-[84px] justify-center'
+       } transition-all duration-300 ease-in-bounce`}
     >
       {children}
     </button>

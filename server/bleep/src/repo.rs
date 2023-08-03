@@ -1,6 +1,8 @@
-use dashmap::DashMap;
+use anyhow::Context;
+use regex::RegexSet;
 use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
 use std::{
+    collections::BTreeSet,
     fmt::{self, Display},
     path::{Path, PathBuf},
     str::FromStr,
@@ -8,32 +10,14 @@ use std::{
     time::SystemTime,
 };
 use tracing::debug;
-use utoipa::ToSchema;
 
-use crate::{
-    ctags, indexes,
-    language::{get_language_info, LanguageInfo},
-    state::{get_relative_path, pretty_write_file},
-};
+use crate::state::get_relative_path;
 
-pub(crate) type FileCache = Arc<DashMap<PathBuf, FreshValue<String>>>;
-
-#[derive(Serialize, Deserialize)]
-pub(crate) struct FreshValue<T> {
-    // default value is `false` on deserialize
-    #[serde(skip)]
-    pub(crate) fresh: bool,
-    pub(crate) value: T,
-}
-
-impl<T> From<T> for FreshValue<T> {
-    fn from(value: T) -> Self {
-        Self { fresh: true, value }
-    }
-}
+pub(crate) mod iterator;
+use iterator::language;
 
 // Types of repo
-#[derive(Serialize, Deserialize, ToSchema, Hash, PartialEq, Eq, Clone, Debug)]
+#[derive(Serialize, Deserialize, Hash, PartialEq, Eq, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum Backend {
     Local,
@@ -101,6 +85,10 @@ impl RepoRef {
 
     pub fn is_local(&self) -> bool {
         self.backend == Backend::Local
+    }
+
+    pub fn is_remote(&self) -> bool {
+        self.backend != Backend::Local
     }
 
     pub fn indexed_name(&self) -> String {
@@ -198,6 +186,47 @@ impl<'de> Deserialize<'de> for RepoRef {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchFilter {
+    All,
+    Head,
+    Select(Vec<String>),
+}
+
+impl BranchFilter {
+    pub(crate) fn patch(&self, old: Option<&BranchFilter>) -> Option<BranchFilter> {
+        let Some(BranchFilter::Select(ref old_list)) = old
+        else {
+	    return Some(self.clone());
+	};
+
+        let BranchFilter::Select(new_list) = self
+        else {
+	    return Some(self.clone());
+	};
+
+        let mut updated = old_list.iter().collect::<BTreeSet<_>>();
+        updated.extend(new_list);
+
+        Some(BranchFilter::Select(updated.into_iter().cloned().collect()))
+    }
+}
+
+impl From<&BranchFilter> for iterator::BranchFilter {
+    fn from(value: &BranchFilter) -> Self {
+        match value {
+            BranchFilter::All => iterator::BranchFilter::All,
+            BranchFilter::Head => iterator::BranchFilter::Head,
+            BranchFilter::Select(regexes) => {
+                let mut regexes = regexes.clone();
+                regexes.push("HEAD".into());
+                iterator::BranchFilter::Select(RegexSet::new(regexes).unwrap())
+            }
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Repository {
     pub disk_path: PathBuf,
@@ -206,6 +235,7 @@ pub struct Repository {
     pub last_commit_unix_secs: u64,
     pub last_index_unix_secs: u64,
     pub most_common_lang: Option<String>,
+    pub branch_filter: Option<BranchFilter>,
 }
 
 impl Repository {
@@ -215,19 +245,26 @@ impl Repository {
     ///
     /// When used with non-local refs
     pub(crate) fn local_from(reporef: &RepoRef) -> Self {
+        use gix::remote::Direction;
         let disk_path = reporef.local_path().unwrap();
 
-        let remote = git2::Repository::open(&disk_path)
-            .ok()
+        let remote = gix::open(&disk_path)
+            .map_err(anyhow::Error::from)
             .and_then(|git| {
-                git.find_remote("origin").ok().and_then(|origin| {
-                    origin.url().and_then(|url| {
-                        debug!(%reporef, origin=url, "found git repo with `origin` remote");
-                        url.parse().ok()
-                    })
-                })
+                let origin = git
+                    .find_default_remote(Direction::Fetch)
+                    .context("no git remote")??;
+                let url = origin.url(Direction::Fetch).context("no fetch url")?;
+                let remote = url
+                    .to_bstring()
+                    .to_string()
+                    .parse()
+                    .map_err(|_| anyhow::format_err!("remote url not understood"))?;
+
+                debug!(%reporef, origin=?remote, "found git repo with remote");
+                Ok(remote)
             })
-            .unwrap_or_else(|| RepoRemote::from(reporef));
+            .unwrap_or_else(|_| RepoRemote::from(reporef));
 
         Self {
             sync_status: SyncStatus::Queued,
@@ -236,25 +273,25 @@ impl Repository {
             disk_path,
             remote,
             most_common_lang: None,
+            branch_filter: None,
         }
     }
 
-    pub(crate) async fn index(
-        &self,
-        reporef: &RepoRef,
-        writers: &indexes::GlobalWriteHandle<'_>,
-    ) -> Result<Arc<RepoMetadata>, RepoError> {
-        use rayon::prelude::*;
-        let metadata = get_repo_metadata(&self.disk_path).await;
+    /// Pre-scan the repository to provide supporting metadata for a
+    /// new indexing operation
+    pub async fn get_repo_metadata(&self) -> Arc<RepoMetadata> {
+        let last_commit_unix_secs = gix::open(&self.disk_path)
+            .context("failed to open git repo")
+            .and_then(|repo| Ok(repo.head()?.peel_to_commit_in_place()?.time()?.seconds))
+            .ok();
 
-        tokio::task::block_in_place(|| {
-            writers
-                .par_iter()
-                .map(|handle| handle.index(reporef, self, &metadata))
-                .collect::<Result<Vec<_>, _>>()
-        })?;
+        let langs = Default::default();
 
-        Ok(metadata)
+        RepoMetadata {
+            last_commit_unix_secs,
+            langs,
+        }
+        .into()
     }
 
     /// Marks the repository for removal on the next sync
@@ -269,37 +306,24 @@ impl Repository {
         self.sync_status = SyncStatus::Queued;
     }
 
-    pub(crate) fn sync_done_with(&mut self, metadata: Arc<RepoMetadata>) {
+    pub(crate) fn sync_done_with(
+        &mut self,
+        new_branch_filters: Option<&BranchFilter>,
+        metadata: Arc<RepoMetadata>,
+    ) {
         self.last_index_unix_secs = get_unix_time(SystemTime::now());
-        self.last_commit_unix_secs = metadata.last_commit_unix_secs;
-        self.sync_status = SyncStatus::Done;
-        self.most_common_lang = metadata.langs.most_common_lang.map(|l| l.to_string());
-    }
+        self.last_commit_unix_secs = metadata.last_commit_unix_secs.unwrap_or(0);
+        self.most_common_lang = metadata
+            .langs
+            .most_common_lang()
+            .map(|l| l.to_string())
+            .or_else(|| self.most_common_lang.take());
 
-    fn file_cache_path(&self, index_dir: &Path) -> PathBuf {
-        let path_hash = blake3::hash(self.disk_path.to_string_lossy().as_bytes()).to_string();
-        index_dir.join(path_hash).with_extension("json")
-    }
-
-    pub(crate) fn open_file_cache(&self, index_dir: &Path) -> Result<FileCache, RepoError> {
-        let file_name = self.file_cache_path(index_dir);
-        match std::fs::File::open(file_name) {
-            Ok(state) => Ok(Arc::new(serde_json::from_reader(state)?)),
-            Err(_) => Ok(Default::default()),
+        if let Some(bf) = new_branch_filters {
+            self.branch_filter = bf.patch(self.branch_filter.as_ref());
         }
-    }
 
-    pub(crate) fn save_file_cache(
-        &self,
-        index_dir: &Path,
-        cache: FileCache,
-    ) -> Result<(), RepoError> {
-        let file_name = self.file_cache_path(index_dir);
-        pretty_write_file(file_name, cache.as_ref())
-    }
-
-    pub(crate) fn delete_file_cache(&self, index_dir: &Path) -> Result<(), RepoError> {
-        Ok(std::fs::remove_file(self.file_cache_path(index_dir))?)
+        self.sync_status = SyncStatus::Done;
     }
 }
 
@@ -311,58 +335,41 @@ fn get_unix_time(time: SystemTime) -> u64 {
 
 #[derive(Debug)]
 pub struct RepoMetadata {
-    pub last_commit_unix_secs: u64,
-    pub symbols: ctags::SymbolMap,
-    pub langs: LanguageInfo,
+    pub last_commit_unix_secs: Option<u64>,
+    pub langs: language::LanguageInfo,
 }
 
-async fn get_repo_metadata(repo_disk_path: &PathBuf) -> Arc<RepoMetadata> {
-    let repo = git2::Repository::open(repo_disk_path)
-        .and_then(|repo| Ok(repo.head()?.peel_to_commit()?.time().seconds() as u64))
-        .unwrap_or(0);
-
-    // Extract symbols using Ctags for all languages which are not covered by a more
-    // precise form of symbol extraction.
-    //
-    // There might be a way to generate this list from intelligence::ALL_LANGUAGES,
-    // but not all lang_ids are valid ctags' languages though, so we hardcode some here:
-    let exclude_langs = &[
-        "javascript",
-        "typescript",
-        "python",
-        "go",
-        "c",
-        "rust",
-        "c++",
-        "c#",
-        "java",
-        // misc languages
-        "json",
-        "markdown",
-        "rmarkdown",
-        "iniconf",
-        "man",
-        "protobuf",
-    ];
-
-    RepoMetadata {
-        last_commit_unix_secs: repo,
-        symbols: ctags::get_symbols(repo_disk_path, exclude_langs).await,
-        langs: get_language_info(repo_disk_path),
-    }
-    .into()
-}
-
-#[derive(Serialize, Deserialize, ToSchema, PartialEq, Eq, Clone, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncStatus {
+    /// There was an error during last sync & index
     Error { message: String },
+
+    /// Repository is not yet managed by bloop
     Uninitialized,
+
+    /// Removed by the user
     Removed,
-    Syncing,
+
+    /// The user requested cancelling the process
+    Cancelling,
+
+    /// Last sync & index cancelled by the user
+    Cancelled,
+
+    /// Queued for sync & index
     Queued,
+
+    /// Active VCS operation in progress
+    Syncing,
+
+    /// Active indexing in progress
     Indexing,
+
+    /// VCS remote has been removed
     RemoteRemoved,
+
+    /// Successfully indexed
     Done,
 }
 
@@ -373,7 +380,7 @@ impl SyncStatus {
     }
 }
 
-#[derive(Serialize, Deserialize, ToSchema, PartialEq, Eq, Clone, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub struct GitRemote {
     /// protocol to use during git operations
@@ -384,14 +391,14 @@ pub struct GitRemote {
     pub address: String,
 }
 
-#[derive(Serialize, Deserialize, ToSchema, PartialEq, Eq, Clone, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum GitProtocol {
     Https,
     Ssh,
 }
 
-#[derive(Serialize, Deserialize, ToSchema, PartialEq, Eq, Clone, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum RepoRemote {
     Git(GitRemote),

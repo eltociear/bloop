@@ -1,5 +1,6 @@
-import React, { useContext, useEffect, useState, useCallback } from 'react';
+import React, { useCallback, useContext, useEffect, useState } from 'react';
 import { Remarkable } from 'remarkable';
+import { Trans } from 'react-i18next';
 import Accordion from '../../components/Accordion';
 import FileIcon from '../../components/FileIcon';
 import { FileTreeFileType, Repository } from '../../types';
@@ -7,10 +8,11 @@ import RepositoryFiles from '../../components/RepositoryFiles';
 import { useSearch } from '../../hooks/useSearch';
 import { FileSearchResponse } from '../../types/api';
 import { cleanRepoName, sortFiles } from '../../utils/file';
-import { isWindowsPath } from '../../utils';
 import { highlightCode } from '../../utils/prism';
 import useAppNavigation from '../../hooks/useAppNavigation';
 import { DeviceContext } from '../../context/deviceContext';
+import { buildRepoQuery } from '../../utils';
+import { SearchContext } from '../../context/searchContext';
 
 const md = new Remarkable({
   html: true,
@@ -33,6 +35,7 @@ type Props = {
 const RepositoryOverview = ({ syncState, repository }: Props) => {
   const [sortedFiles, setSortedFiles] = useState(repository.files);
   const { openLink } = useContext(DeviceContext);
+  const { selectedBranch } = useContext(SearchContext.SelectedBranch);
 
   const [readme, setReadme] = useState<{
     contents: string;
@@ -46,16 +49,18 @@ const RepositoryOverview = ({ syncState, repository }: Props) => {
       (file) => file.path.toLowerCase() === 'readme.md',
     );
     if (readmePath) {
-      searchQuery(`open:true repo:${repository.name} path:${readmePath.path}`);
+      searchQuery(
+        buildRepoQuery(repository.name, readmePath.path, selectedBranch),
+      );
     } else {
       setReadme(null);
     }
 
     setSortedFiles(repository.files.sort(sortFiles));
-  }, [repository.files]);
+  }, [repository.files, selectedBranch]);
 
   useEffect(() => {
-    if (!readmeData) {
+    if (!readmeData?.data?.[0]?.data?.contents) {
       return;
     }
     setReadme({
@@ -66,7 +71,7 @@ const RepositoryOverview = ({ syncState, repository }: Props) => {
 
   const fileClick = useCallback((path: string, type: FileTreeFileType) => {
     if (type === FileTreeFileType.FILE) {
-      navigateFullResult(repository.name, path);
+      navigateFullResult(path);
     } else if (type === FileTreeFileType.DIR) {
       navigateRepoPath(repository.name, path === '/' ? '' : path);
     }
@@ -75,10 +80,11 @@ const RepositoryOverview = ({ syncState, repository }: Props) => {
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <h4>Files in {repository.name}</h4>
-        <p className="body-s text-gray-500"></p>
+        <h4>
+          <Trans>Files in</Trans> {repository.name}
+        </h4>
       </div>
-      <div className="select-none">
+      <div className="">
         <RepositoryFiles
           files={sortedFiles}
           onClick={fileClick}

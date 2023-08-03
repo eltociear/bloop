@@ -1,4 +1,5 @@
 # Env
+.direnv
 .idea
 .DS_Store
 .vscode
@@ -27,7 +28,22 @@ server/schema
 server/target
 server/tmp_index
 
+server/bleep/bleep.db*
+
 playwright-report
 .tests.env
 
 .env
+
+# local config
+/local_config.json
+
+apps/desktop/src-tauri/dylibs/*.so
+apps/desktop/src-tauri/dylibs/*.dll
+apps/desktop/src-tauri/frameworks/*.dylib
+
+# qdrant
+/qdrant/storage
+/qdrant/snapshots
+.qdrant-initialized
+

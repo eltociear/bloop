@@ -75,7 +75,7 @@ const Tooltip = ({ text, placement, children }: PropsWithChildren<Props>) => {
           }`}
         >
           <span
-            className={`text-gray-700`}
+            className={`text-bg-shade z-40`}
             style={
               attrs['data-placement']?.startsWith('top') ||
               attrs['data-placement']?.startsWith('bottom')
@@ -90,7 +90,7 @@ const Tooltip = ({ text, placement, children }: PropsWithChildren<Props>) => {
             {getTail(attrs['data-placement'])}
           </span>
           <span
-            className={`inline-block w-max px-3 py-2 w-fit bg-gray-700 rounded text-center text-gray-300 text-xs`}
+            className={`inline-block w-max px-3 py-2 bg-bg-shade rounded text-center text-label-title text-xs shadow-high`}
           >
             {text}
           </span>

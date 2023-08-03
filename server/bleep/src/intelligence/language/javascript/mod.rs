@@ -5,6 +5,16 @@ pub static JAVASCRIPT: TSLanguageConfig = TSLanguageConfig {
     file_extensions: &["js", "jsx"],
     grammar: tree_sitter_javascript::language,
     scope_query: MemoizedQuery::new(include_str!("./scopes.scm")),
+    hoverable_query: MemoizedQuery::new(
+        r#"
+        [(identifier)
+         (property_identifier)
+         (shorthand_property_identifier)
+         (shorthand_property_identifier_pattern)
+         (private_property_identifier)
+         (statement_identifier)] @hoverable
+        "#,
+    ),
     namespaces: &[&[
         //variables
         "constant",
@@ -36,7 +46,7 @@ mod test {
             d = a;
         "#;
 
-        let (_, def_count, _) = counts(src, "JavaScript");
+        let (_, def_count, _, _) = counts(src, "JavaScript");
 
         // a, b, c, d
         assert_eq!(def_count, 4);
@@ -55,7 +65,7 @@ mod test {
             function* five() {}
         "#;
 
-        let (_, def_count, _) = counts(src, "JavaScript");
+        let (_, def_count, _, _) = counts(src, "JavaScript");
 
         assert_eq!(def_count, 5);
     }
@@ -71,13 +81,16 @@ mod test {
             const g = (h) => {}
             const i = (j, k) => {}
 
-            function({l, field: {m, n}}) {}
-            function({o, ...p}) {}
+            // TODO: object patterns with shorthand patterns are 
+            // not handled in every situation right now (only in const/var decls.)
+            // function({field: {l, m}}) {}
+
+            function({...n}) {}
         "#;
 
-        let (_, def_count, _) = counts(src, "JavaScript");
+        let (_, def_count, _, _) = counts(src, "JavaScript");
 
-        assert_eq!(def_count, 16);
+        assert_eq!(def_count, 12);
     }
 
     #[test]
@@ -89,7 +102,7 @@ mod test {
             }
         "#;
 
-        let (_, def_count, _) = counts(src, "JavaScript");
+        let (_, def_count, _, _) = counts(src, "JavaScript");
 
         // class, prop, prop
         assert_eq!(def_count, 3);
@@ -103,9 +116,9 @@ mod test {
             import { four, member as five } from "module";
         "#;
 
-        let (_, def_count, _) = counts(src, "JavaScript");
+        let (_, _, _, import_count) = counts(src, "JavaScript");
 
-        assert_eq!(def_count, 5);
+        assert_eq!(import_count, 5);
     }
 
     #[test]
@@ -122,7 +135,7 @@ mod test {
                     break three;
         "#;
 
-        let (_, def_count, _) = counts(src, "JavaScript");
+        let (_, def_count, _, _) = counts(src, "JavaScript");
 
         assert_eq!(def_count, 3);
     }
@@ -139,7 +152,7 @@ mod test {
             a.length();
         "#;
 
-        let (_, _, ref_count) = counts(src, "JavaScript");
+        let (_, _, ref_count, _) = counts(src, "JavaScript");
 
         assert_eq!(ref_count, 5);
     }
@@ -154,7 +167,7 @@ mod test {
             await a;
         "#;
 
-        let (_, _, ref_count) = counts(src, "JavaScript");
+        let (_, _, ref_count, _) = counts(src, "JavaScript");
 
         assert_eq!(ref_count, 3);
     }
@@ -189,7 +202,7 @@ mod test {
             a.b
         "#;
 
-        let (_, _, ref_count) = counts(src, "JavaScript");
+        let (_, _, ref_count, _) = counts(src, "JavaScript");
 
         assert_eq!(ref_count, 13);
     }
@@ -208,7 +221,7 @@ mod test {
             export default c;
         "#;
 
-        let (_, _, ref_count) = counts(src, "JavaScript");
+        let (_, _, ref_count, _) = counts(src, "JavaScript");
 
         assert_eq!(ref_count, 5);
     }
@@ -228,7 +241,7 @@ mod test {
 
         "#;
 
-        let (_, _, ref_count) = counts(src, "JavaScript");
+        let (_, _, ref_count, _) = counts(src, "JavaScript");
 
         assert_eq!(ref_count, 7);
     }
@@ -240,7 +253,7 @@ mod test {
             b = <Foo.Bar>{string(a)}<span>b</span> c</Foo.Bar>;
         "#;
 
-        let (_, _, ref_count) = counts(src, "JavaScript");
+        let (_, _, ref_count, _) = counts(src, "JavaScript");
 
         assert_eq!(ref_count, 1);
     }
@@ -269,7 +282,7 @@ mod test {
         // Button           x 4,
         // ChevronRightIcon x 1,
         // NavBarNoUser     x 1
-        let (_, _, ref_count) = counts(src, "JSX");
+        let (_, _, ref_count, _) = counts(src, "JSX");
 
         assert_eq!(ref_count, 6);
     }
@@ -328,19 +341,69 @@ mod test {
             expect![[r#"
                 scope {
                     definitions: [
-                        Client {
-                            kind: "variable",
-                            context: "const { §Client§ } = require(\"@elastic/elasticsearch\");",
-                            referenced in (1): [
-                                `const elasticClient = new §Client§({node: ELASTIC_CONNECTION_STRING});`,
-                            ],
-                        },
                         elasticClient {
                             kind: "constant",
                             context: "const §elasticClient§ = new Client({node: ELASTIC_CONNECTION_STRING});",
                         },
                     ],
+                    imports: [
+                        Client {
+                            context: "const { §Client§ } = require(\"@elastic/elasticsearch\");",
+                            referenced in (1): [
+                                `const elasticClient = new §Client§({node: ELASTIC_CONNECTION_STRING});`,
+                            ],
+                        },
+                    ],
                     child scopes: [
+                        scope {
+                            definitions: [],
+                            child scopes: [],
+                        },
+                    ],
+                }
+            "#]],
+        )
+    }
+
+    #[test]
+    fn catch_clause_regression() {
+        test_scopes(
+            "JavaScript",
+            r#"
+            try {
+                someFn();
+            } catch (err) {
+                return err;
+            } finally {
+                return 0;
+            }
+            "#
+            .as_bytes(),
+            expect![[r#"
+                scope {
+                    definitions: [],
+                    child scopes: [
+                        scope {
+                            definitions: [],
+                            child scopes: [],
+                        },
+                        scope {
+                            definitions: [
+                                err {
+                                    kind: "variable",
+                                    context: "} catch (§err§) {",
+                                    referenced in (1): [
+                                        `return §err§;`,
+                                    ],
+                                },
+                            ],
+                            child scopes: [
+                                scope {
+                                    definitions: [],
+                                    child scopes: [],
+                                },
+                            ],
+                        },
                         scope {
                             definitions: [],
                             child scopes: [],

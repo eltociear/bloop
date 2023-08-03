@@ -21,9 +21,9 @@ pub struct Configuration {
     #[serde(default)]
     pub source: StateSource,
 
-    #[clap(short, long, default_value_os_t = default_index_path())]
-    #[serde(default = "default_index_path")]
-    /// Directory to store indexes
+    #[clap(short, long, default_value_os_t = default_index_dir())]
+    #[serde(default = "default_index_dir")]
+    /// Directory to store all persistent state
     pub index_dir: PathBuf,
 
     #[clap(long, default_value_t = false)]
@@ -40,6 +40,13 @@ pub struct Configuration {
     #[serde(default)]
     /// Disable system-native notification backends to detect new git commits immediately.
     pub disable_fsevents: bool,
+
+    #[clap(long, default_value_t = false)]
+    #[serde(default)]
+    /// Avoid writing logs to files.
+    ///
+    /// If this flag is not set to `true`, logs are written to <index_dir>/logs/bloop.log.YYYY-MM-DD-HH
+    pub disable_log_write: bool,
 
     #[clap(short, long, default_value_t = default_buffer_size())]
     #[serde(default = "default_buffer_size")]
@@ -69,10 +76,6 @@ pub struct Configuration {
     //
     // External dependencies
     //
-    #[serde(default)]
-    /// Path to Ctags binary
-    pub ctags_path: Option<PathBuf>,
-
     #[clap(long, default_value_t = default_answer_api_url())]
     #[serde(default = "default_answer_api_url")]
     /// URL for the answer-api
@@ -83,12 +86,24 @@ pub struct Configuration {
     pub analytics_key: Option<String>,
 
     #[clap(long)]
+    /// Key for analytics backend for frontend
+    pub analytics_key_fe: Option<String>,
+
+    #[clap(long)]
     /// Analytics data plane identifier
     pub analytics_data_plane: Option<String>,
 
     #[clap(long)]
     /// Sentry Data Source Name
     pub sentry_dsn: Option<String>,
+
+    #[clap(long)]
+    /// Sentry Data Source Name for frontend
+    pub sentry_dsn_fe: Option<String>,
+
+    #[clap(long)]
+    /// Path to dynamic libraries used in the app.
+    pub dylib_dir: Option<PathBuf>,
 
     //
     // Semantic values
@@ -185,9 +200,14 @@ impl Configuration {
 
     pub fn cli_overriding_config_file() -> Result<Self> {
         let cli = Self::from_cli()?;
-        let Ok(file) = cli.config_file.as_ref().context("no config file specified").and_then(Self::read) else {
-	    return Ok(cli);
-	};
+        let Ok(file) = cli
+            .config_file
+            .as_ref()
+            .context("no config file specified")
+            .and_then(Self::read) else
+        {
+            return Ok(cli);
+        };
 
         Ok(Self::merge(file, cli))
     }
@@ -203,17 +223,17 @@ impl Configuration {
         Self {
             config_file: b.config_file.or(a.config_file),
 
-            ctags_path: b.ctags_path.or(a.ctags_path),
-
             source: right_if_default!(b.source, a.source, Default::default()),
 
-            index_dir: b.index_dir,
+            index_dir: right_if_default!(b.index_dir, a.index_dir, default_index_dir()),
 
             index_only: b.index_only | a.index_only,
 
             disable_background: b.disable_background | a.disable_background,
 
             disable_fsevents: b.disable_fsevents | a.disable_fsevents,
+
+            disable_log_write: b.disable_log_write | a.disable_log_write,
 
             buffer_size: right_if_default!(b.buffer_size, a.buffer_size, default_buffer_size()),
 
@@ -264,10 +284,15 @@ impl Configuration {
             bot_secret: b.bot_secret.or(a.bot_secret),
 
             analytics_key: b.analytics_key.or(a.analytics_key),
+            analytics_key_fe: b.analytics_key_fe.or(a.analytics_key_fe),
 
             analytics_data_plane: b.analytics_data_plane.or(a.analytics_data_plane),
 
             sentry_dsn: b.sentry_dsn.or(a.sentry_dsn),
+
+            sentry_dsn_fe: b.sentry_dsn_fe.or(a.sentry_dsn_fe),
+
+            dylib_dir: b.dylib_dir.or(a.dylib_dir),
         }
     }
 }
@@ -295,9 +320,9 @@ where
 //
 // Configuration defaults
 //
-fn default_index_path() -> PathBuf {
+fn default_index_dir() -> PathBuf {
     match directories::ProjectDirs::from("ai", "bloop", "bleep") {
-        Some(dirs) => dirs.cache_dir().to_owned(),
+        Some(dirs) => dirs.data_dir().to_owned(),
         None => "bloop_index".into(),
     }
 }

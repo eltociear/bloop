@@ -1,7 +1,7 @@
 import React, { useMemo } from 'react';
 import { ResultClick, ResultType } from '../../types/results';
 import Pagination from '../../components/Pagination';
-import { ResultsPreviewSkeleton } from '../Skeleton';
+import { ResultsPreviewSkeleton } from '../../components/Skeleton';
 import ResultPreview from './ResultPreview';
 
 type Props = {
@@ -28,11 +28,17 @@ const ResultsList = ({
       )),
     [results, onResultClick],
   );
-  return loading ? (
+  return loading && !results?.length ? (
     <ResultsPreviewSkeleton />
   ) : (
     <>
-      <ul className="flex flex-col gap-3.5 overflow-auto">{items}</ul>
+      <ul
+        className={`flex flex-col gap-3.5 overflow-auto ${
+          loading ? 'opacity-50' : 'opacity-100'
+        } transition-opacity duration-200`}
+      >
+        {items}
+      </ul>
       <div className="mt-8">
         <Pagination page={page} setPage={setPage} totalPages={totalPages} />
       </div>

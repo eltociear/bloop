@@ -1,14 +1,31 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { invoke } from '@tauri-apps/api';
 import { open } from '@tauri-apps/api/shell';
 import { homeDir } from '@tauri-apps/api/path';
+import { relaunch } from '@tauri-apps/api/process';
 import { message, open as openDialog } from '@tauri-apps/api/dialog';
 import { listen } from '@tauri-apps/api/event';
 import * as tauriOs from '@tauri-apps/api/os';
 import { getVersion } from '@tauri-apps/api/app';
+import { BrowserRouter } from 'react-router-dom';
 import ClientApp from '../../../client/src/App';
-import TextSearch from './TextSearch';
 import '../../../client/src/index.css';
+import useKeyboardNavigation from '../../../client/src/hooks/useKeyboardNavigation';
+import { getConfig } from '../../../client/src/services/api';
+import { LocaleContext } from '../../../client/src/context/localeContext';
+import i18n from '../../../client/src/i18n';
+import {
+  getPlainFromStorage,
+  LANGUAGE_KEY,
+  savePlainToStorage,
+} from '../../../client/src/services/storage';
+import TextSearch from './TextSearch';
 
 // let askedToUpdate = false;
 // let intervalId: number;
@@ -69,10 +86,8 @@ import '../../../client/src/index.css';
 //     console.log(error);
 //   }
 // };
-
 function App() {
   const [homeDirectory, setHomeDir] = useState('');
-  const [deviceId, setDeviceId] = useState('');
   const [indexFolder, setIndexFolder] = useState('');
   const [os, setOs] = useState({
     arch: '',
@@ -82,16 +97,26 @@ function App() {
   });
   const [release, setRelease] = useState('');
   const contentContainer = useRef<HTMLDivElement>(null);
+  const [envConfig, setEnvConfig] = useState({});
+  const [locale, setLocale] = useState(
+    getPlainFromStorage(LANGUAGE_KEY) || 'en',
+  );
+
+  useEffect(() => {
+    i18n.changeLanguage(locale);
+    savePlainToStorage(LANGUAGE_KEY, locale);
+  }, [locale]);
+
+  const localeContextValue = useMemo(
+    () => ({
+      locale,
+      setLocale,
+    }),
+    [locale],
+  );
 
   useEffect(() => {
     homeDir().then(setHomeDir);
-    invoke('get_device_id')
-      .then((res) => {
-        if (res) {
-          setDeviceId(res.toString().trim());
-        }
-      })
-      .catch(console.log);
     Promise.all([
       tauriOs.arch(),
       tauriOs.type(),
@@ -107,12 +132,30 @@ function App() {
       //   1000 * 60 * 60,
       // );
     });
-    if (import.meta.env.SENTRY_DSN_BE) {
-      invoke('initialize_sentry', {
-        dsn: import.meta.env.SENTRY_DSN_BE,
-        environment: import.meta.env.MODE,
-      });
+  }, []);
+
+  const handleKeyEvent = useCallback((e: KeyboardEvent) => {
+    if (
+      (e.key === '=' || e.key === '-' || e.key === '0') &&
+      (e.metaKey || e.ctrlKey)
+    ) {
+      const root = document.querySelector(':root');
+      if (!root) {
+        return;
+      }
+      const style = window
+        .getComputedStyle(root, null)
+        .getPropertyValue('font-size');
+      const fontSize = parseFloat(style);
+
+      (root as HTMLElement).style.fontSize =
+        (e.key === '0' ? 16 : fontSize + (e.key === '=' ? 1 : -1)) + 'px';
     }
+  }, []);
+  useKeyboardNavigation(handleKeyEvent);
+
+  useEffect(() => {
+    setTimeout(() => getConfig().then(setEnvConfig), 1000); // server returns wrong tracking_id within first second
   }, []);
 
   const deviceContextValue = useMemo(
@@ -127,7 +170,6 @@ function App() {
       chooseFolder: openDialog,
       indexFolder,
       setIndexFolder,
-      deviceId,
       listen,
       os,
       invokeTauriCommand: invoke,
@@ -136,17 +178,22 @@ function App() {
       isRepoManagementAllowed: true,
       forceAnalytics: false,
       isSelfServe: false,
+      envConfig,
+      setEnvConfig,
       showNativeMessage: message,
+      relaunch,
     }),
-    [homeDirectory, indexFolder, deviceId, os, release],
+    [homeDirectory, indexFolder, os, release, envConfig],
   );
   return (
-    <>
+    <LocaleContext.Provider value={localeContextValue}>
       <TextSearch contentRoot={contentContainer.current} />
       <div ref={contentContainer}>
-        <ClientApp deviceContextValue={deviceContextValue} />
+        <BrowserRouter>
+          <ClientApp deviceContextValue={deviceContextValue} />
+        </BrowserRouter>
       </div>
-    </>
+    </LocaleContext.Provider>
   );
 }
 

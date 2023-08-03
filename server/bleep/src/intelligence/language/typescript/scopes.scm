@@ -17,6 +17,7 @@
   (for_statement)
   (for_in_statement)
   (switch_case)
+  (catch_clause)
   ;; assignments are permitted inside sequence exprs:
   ;;
   ;;     const a = 2;
@@ -69,6 +70,9 @@
 ;; function params
 (formal_parameters
   (required_parameter
+    (identifier) @local.definition.parameter))
+(formal_parameters
+  (optional_parameter
     (identifier) @local.definition.parameter))
 
 ;; patterns
@@ -128,19 +132,20 @@
 (arrow_function
   (identifier) @local.definition.variable)
 
-;; imports are defs, but of unknown kinds
+
+;; imports
 
 ;; import defaultMember from "module";
 (import_statement
-  (import_clause (identifier) @local.definition))
+  (import_clause (identifier) @local.import))
 
 ;; import { member } from "module";
 ;; import { member as alias } from "module";
 (import_statement
   (import_clause
     (named_imports
-      [(import_specifier !alias (identifier) @local.definition)
-       (import_specifier alias: (identifier) @local.definition)])))
+      [(import_specifier !alias (identifier) @local.import)
+       (import_specifier alias: (identifier) @local.import)])))
 
 ;; for (item in list)
 ;;
@@ -198,6 +203,10 @@
 ;; interface T
 (interface_declaration
   (type_identifier) @local.definition.interface)
+
+;; catch clauses
+(catch_clause
+  (identifier) @local.definition.variable)
 
 
 ;; refs

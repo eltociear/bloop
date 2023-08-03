@@ -1,5 +1,6 @@
-import { MouseEvent } from 'react';
+import { MouseEvent, useCallback } from 'react';
 import { v4 as uuidv4 } from 'uuid';
+import { RepoType, RepoUi } from '../types/general';
 import langs from './langs.json';
 
 export const copyToClipboard = (value: string) => {
@@ -109,10 +110,14 @@ export const splitPathForBreadcrumbs = (
     }));
 };
 
-export const buildRepoQuery = (repo?: string, path?: string) => {
+export const buildRepoQuery = (
+  repo?: string,
+  path?: string,
+  selectedBranch?: string | null,
+) => {
   return `open:true ${repo ? `repo:${repo}` : ''} ${
-    path ? `path:${path}` : ''
-  }`;
+    path ? `path:${path.includes(' ') ? `"${path}"` : path}` : ''
+  }${selectedBranch ? ` branch:${selectedBranch}` : ''}`;
 };
 
 export const getFileManagerName = (os: string) => {
@@ -126,7 +131,64 @@ export const getFileManagerName = (os: string) => {
   }
 };
 
+export function groupReposByParentFolder(repos: RepoType[]): RepoUi[] {
+  const isWindows = repos?.[0]?.ref ? isWindowsPath(repos[0].ref) : false;
+  // Extract unique parent folders
+  const parentFolders = Array.from(
+    new Set(
+      repos.map((obj) =>
+        obj.ref
+          .split(isWindows ? '\\' : '/')
+          .slice(0, -1)
+          .join(isWindows ? '\\' : '/'),
+      ),
+    ),
+  );
+
+  // Group repos by parent folder
+  const groupedObjects: {
+    [parentFolder: string]: string[];
+  } = {};
+  for (const parentFolder of parentFolders) {
+    groupedObjects[parentFolder] = repos
+      .filter((obj) => obj.ref.startsWith(parentFolder + '/'))
+      .map((r) => r.ref);
+  }
+
+  // Add folderName property to each repo
+  const objectsWithFolderName: RepoUi[] = repos.map((r) => {
+    const folderName =
+      Object.entries(groupedObjects)
+        .filter(([folder, repos]) => repos.includes(r.ref))
+        .sort((a, b) => (a[0].length < b[0].length ? -1 : 1))
+        .pop()?.[0] || isWindows
+        ? '\\'
+        : '/';
+    return {
+      ...r,
+      folderName,
+      selected: true,
+      shortName: r.name,
+    };
+  });
+
+  const commonFolder = getCommonFolder(
+    objectsWithFolderName.map((lr) => lr.folderName),
+  )
+    .split(isWindows ? '\\' : '/')
+    .slice(0, -1)
+    .join(isWindows ? '\\' : '/');
+
+  return objectsWithFolderName.map((r) => ({
+    ...r,
+    folderName: r.folderName.replace(commonFolder, ''),
+  }));
+}
+
 export const getCommonFolder = (paths: string[]) => {
+  if (!paths?.length) {
+    return '/';
+  }
   const pathParts = paths
     .map((p) => splitPath(p))
     .sort((a, b) => a.length - b.length);
@@ -167,3 +229,100 @@ export const propsAreShallowEqual = <P>(
       prevProps[k as keyof typeof prevProps] ===
       nextProps[k as keyof typeof nextProps],
   );
+
+export const deleteAuthCookie = () => {
+  document.cookie =
+    'auth_cookie=; Path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT;';
+};
+
+export const previewTheme = (key: string) => {
+  document.body.classList.add('notransition'); // to avoid flashing UI with color changes
+  document.body.dataset.theme = key;
+  setTimeout(
+    () => document.body.classList.remove('notransition'),
+    300, // longest color transition
+  );
+};
+
+export const calculatePopupPositionInsideContainer = (
+  top: number,
+  left: number,
+  containerRect: DOMRect,
+) => {
+  const viewportWidth =
+    window.innerWidth || document.documentElement.clientWidth;
+  const viewportHeight =
+    window.innerHeight || document.documentElement.clientHeight;
+
+  const popupWidth = 170; // Adjust as needed
+  const popupHeight = 34; // Adjust as needed
+
+  top -= popupHeight + 15;
+
+  // Adjust top position to ensure the popup stays within the container
+  if (top < containerRect.top) {
+    top = containerRect.top;
+  } else if (top > containerRect.bottom) {
+    top = containerRect.bottom - popupHeight;
+  }
+
+  // Adjust left position to ensure the popup stays within the container
+  if (left < containerRect.left) {
+    left = containerRect.left;
+  } else if (left > containerRect.right) {
+    left = containerRect.right - popupWidth;
+  }
+
+  // Adjust top position to ensure the popup stays within the viewport
+  if (top < 0) {
+    top = 0;
+  } else if (top + popupHeight > viewportHeight) {
+    top = viewportHeight - popupHeight;
+  }
+
+  // Adjust left position to ensure the popup stays within the viewport
+  if (left < 0) {
+    left = 0;
+  } else if (left + popupWidth > viewportWidth) {
+    left = viewportWidth - popupWidth;
+  }
+
+  return { top, left };
+};
+
+export const escapeHtml = (unsafe: string) => {
+  return unsafe
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
+};
+
+export function humanFileSize(
+  bytes: number,
+  si: boolean = true,
+  dp: number = 1,
+) {
+  const thresh = si ? 1000 : 1024;
+
+  if (Math.abs(bytes) < thresh) {
+    return bytes + ' B';
+  }
+
+  const units = si
+    ? ['kB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB']
+    : ['KiB', 'MiB', 'GiB', 'TiB', 'PiB', 'EiB', 'ZiB', 'YiB'];
+  let u = -1;
+  const r = 10 ** dp;
+
+  do {
+    bytes /= thresh;
+    ++u;
+  } while (
+    Math.round(Math.abs(bytes) * r) / r >= thresh &&
+    u < units.length - 1
+  );
+
+  return bytes.toFixed(dp) + ' ' + units[u];
+}

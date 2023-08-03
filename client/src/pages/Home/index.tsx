@@ -1,40 +1,104 @@
-import React, { useContext, useState } from 'react';
+import React, { useContext, useEffect, useState } from 'react';
 import * as Sentry from '@sentry/react';
-import ListNavigation from '../../components/IdeNavigation/ListNavigation';
-import { GitHubLogo, List, Repository } from '../../icons';
+import { Trans, useTranslation } from 'react-i18next';
 import ErrorFallback from '../../components/ErrorFallback';
+import LiteLoader from '../../components/Loaders/LiteLoader';
+import Button from '../../components/Button';
+import { CloseSign } from '../../icons';
+import { RepositoriesContext } from '../../context/repositoriesContext';
+import { RepoType, SyncStatus } from '../../types/general';
 import { DeviceContext } from '../../context/deviceContext';
-import { ReposFilter } from '../../types/general';
+import AddRepos from './AddRepos';
 import ReposSection from './ReposSection';
+import AddRepoCard from './AddRepoCard';
 
-type Props = {
-  emptyRepos?: boolean; // only for storybook
+const filterRepositories = (repos?: RepoType[]) => {
+  return (
+    repos?.filter(
+      (r) =>
+        r.sync_status !== SyncStatus.Uninitialized &&
+        r.sync_status !== SyncStatus.Removed,
+    ) || []
+  );
 };
 
-const listNavigationItems = [
-  { title: 'All', icon: <List /> },
-  { title: 'Local repos', icon: <Repository /> },
-  { title: 'GitHub repos', icon: <GitHubLogo /> },
-];
-
-const HomePage = ({ emptyRepos }: Props) => {
-  const [filter, setFilter] = useState<ReposFilter>(ReposFilter.ALL);
+const HomePage = () => {
+  const { t } = useTranslation();
+  const { fetchRepos, repositories } = useContext(RepositoriesContext);
   const { isSelfServe } = useContext(DeviceContext);
+  const [popupOpen, setPopupOpen] = useState(false);
+  const [addReposOpen, setAddReposOpen] = useState<
+    null | 'local' | 'github' | 'public'
+  >(null);
+  const [reposToShow, setReposToShow] = useState<RepoType[]>(
+    filterRepositories(repositories),
+  );
+
+  useEffect(() => {
+    if (repositories) {
+      setReposToShow(filterRepositories(repositories));
+    }
+  }, [repositories]);
 
   return (
-    <>
-      {isSelfServe ? null : (
-        <div className="w-90 text-gray-300 border-r border-gray-800 flex-shrink-0 h-full">
-          <ListNavigation
-            title=" "
-            items={listNavigationItems}
-            setSelected={setFilter}
-            selected={filter}
-          />
+    <div className="w-full flex flex-col mx-auto max-w-6.5xl">
+      <div className="p-8 pb-0">
+        <h4 className="mb-3">
+          <Trans>Add</Trans>
+        </h4>
+        <div className="flex gap-3.5 pb-2">
+          <AddRepoCard type="github" onClick={setAddReposOpen} />
+          <AddRepoCard type="public" onClick={setAddReposOpen} />
+          {!isSelfServe && (
+            <AddRepoCard type="local" onClick={setAddReposOpen} />
+          )}
+        </div>
+      </div>
+      <ReposSection
+        reposToShow={reposToShow}
+        setReposToShow={setReposToShow}
+        repositories={repositories}
+      />
+      <AddRepos
+        addRepos={addReposOpen}
+        onClose={(isSubmitted) => {
+          if (isSubmitted) {
+            fetchRepos();
+            setTimeout(() => fetchRepos(), 1000);
+            setPopupOpen(true);
+            setTimeout(() => setPopupOpen(false), 3000);
+          }
+          setAddReposOpen(null);
+        }}
+      />
+      {popupOpen && (
+        <div
+          className={`fixed w-85 p-3 flex gap-3 bg-bg-shade border border-bg-border rounded-lg shadow-high left-8 bottom-24 z-40 text-bg-main`}
+        >
+          <LiteLoader />
+          <div className="flex flex-col gap-1">
+            <p className="body-s text-label-title">
+              <Trans>Syncing repository</Trans>
+            </p>
+            <p className="caption text-label-base">
+              <Trans>
+                We are syncing your repository to bloop. This might take a
+                couple of minutes
+              </Trans>
+            </p>
+          </div>
+          <Button
+            variant="tertiary"
+            size="tiny"
+            onlyIcon
+            title={t('Close')}
+            onClick={() => setPopupOpen(false)}
+          >
+            <CloseSign />
+          </Button>
         </div>
       )}
-      <ReposSection filter={filter} emptyRepos={emptyRepos} />
-    </>
+    </div>
   );
 };
 

@@ -1,3 +1,5 @@
+import { Token } from './prism';
+import { RefDefDataItem, TokenInfoResponse } from './api';
 import { FileTreeFileType, RepositoryFile } from './index';
 
 export type BaseSymbolType =
@@ -105,6 +107,18 @@ export interface Snippet {
   symbols?: SnippetSymbol[];
 }
 
+export type HighlightMap = {
+  highlight: boolean;
+  token: Token;
+  startHl?: boolean;
+  endHl?: boolean;
+};
+
+export type TokensLine = {
+  tokens: HighlightMap[];
+  lineNumber: number | null;
+};
+
 export type Range = { start: number; end: number };
 
 export type ResultType = CodeResult | RepoResult | FileResult;
@@ -117,7 +131,8 @@ export type FullResult = {
   language: string;
   hoverableRanges: Record<number, Range[]>;
   repoName: string;
-  fileTree?: FileTreeItem[];
+  size: number;
+  loc: number;
 };
 
 export type DirectoryResult = {
@@ -134,6 +149,7 @@ export type DirectoryResult = {
 export type TokenInfoItem = {
   code: string;
   line: number;
+  highlights: Range[];
 };
 
 export type TokenInfoFile = {
@@ -141,9 +157,22 @@ export type TokenInfoFile = {
   items: TokenInfoItem[];
 };
 
+export type TokenInfoType = 'reference' | 'definition';
+
 export type TokenInfo = {
   references?: TokenInfoFile[];
   definitions?: TokenInfoFile[];
+};
+
+export type TokenInfoWrapped = {
+  hoverableRange: Range | null;
+  tokenRange: Range | null;
+  lineNumber?: number;
+  isLoading: boolean;
+  data: {
+    references: { file: string; data: RefDefDataItem[] }[];
+    definitions: { file: string; data: RefDefDataItem[] }[];
+  };
 };
 
 export type ResultClick = (

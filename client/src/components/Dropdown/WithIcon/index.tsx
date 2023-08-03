@@ -1,4 +1,6 @@
 import React, { useRef, useState } from 'react';
+import { TippyProps } from '@tippyjs/react';
+import { useTranslation } from 'react-i18next';
 import { ChevronDownFilled, ChevronUpFilled } from '../../../icons';
 import ContextMenu, { ContextMenuItem } from '../../ContextMenu';
 import Button from '../../Button';
@@ -9,10 +11,16 @@ type Props = {
   hint?: string;
   icon: React.ReactElement;
   dropdownBtnClassName?: string;
+  btnTitle?: string;
   noChevron?: boolean;
-  btnVariant?: 'primary' | 'secondary' | 'tertiary';
-  btnSize?: 'small' | 'medium' | 'large';
+  btnVariant?: 'primary' | 'secondary' | 'tertiary' | 'tertiary-disabled';
+  btnSize?: 'small' | 'medium' | 'large' | 'tiny';
   btnOnlyIcon?: boolean;
+  lastItemFixed?: boolean;
+  disabled?: boolean;
+  size?: 'small' | 'medium' | 'large';
+  dropdownPlacement?: TippyProps['placement'];
+  appendTo?: TippyProps['appendTo'];
 };
 
 const Dropdown = ({
@@ -24,10 +32,19 @@ const Dropdown = ({
   btnVariant = 'tertiary',
   btnSize = 'medium',
   btnOnlyIcon,
+  lastItemFixed,
+  size = 'medium',
+  dropdownPlacement = 'bottom-start',
+  appendTo = 'parent',
+  btnTitle,
+  disabled,
 }: Props) => {
+  const { t } = useTranslation();
   const [visible, setVisibility] = useState(false);
   const ref = useRef(null);
-  useOnClickOutside(ref, () => setVisibility(false));
+  useOnClickOutside(ref, () =>
+    appendTo === 'parent' ? setVisibility(false) : {},
+  );
 
   return (
     <div className="relative" ref={ref}>
@@ -36,19 +53,27 @@ const Dropdown = ({
         visible={visible}
         title={hint}
         handleClose={() => setVisibility(false)}
-        closeOnClickOutside={false}
+        closeOnClickOutside={appendTo === 'parent'}
+        lastItemFixed={lastItemFixed}
+        size={size}
+        dropdownPlacement={dropdownPlacement}
+        appendTo={appendTo}
       >
         <Button
           variant={btnVariant}
           size={btnSize}
           id="dropdownDefault"
           data-dropdown-toggle="dropdown"
-          className={`${visible ? 'text-gray-50' : ''} ${
+          className={`${visible ? 'text-label-title' : ''} ${
             dropdownBtnClassName || ''
           }`}
-          onClick={() => setVisibility(!visible)}
+          onClick={(e) => {
+            e.stopPropagation();
+            setVisibility(!visible);
+          }}
+          disabled={disabled}
           onlyIcon={btnOnlyIcon}
-          title="Open dropdown"
+          title={btnTitle || t('Open dropdown')}
         >
           {icon}
           {noChevron ? null : visible ? (

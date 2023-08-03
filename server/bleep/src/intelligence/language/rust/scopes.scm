@@ -175,23 +175,23 @@
 
 ;; use item;
 (use_declaration
-  (identifier) @local.definition)
+  (identifier) @local.import)
 
 ;; use path as item;
 (use_as_clause
-  alias: (identifier) @local.definition)
+  alias: (identifier) @local.import)
 
 ;; use path::item;
 (use_declaration 
   (scoped_identifier 
-    name: (identifier) @local.definition))
+    name: (identifier) @local.import))
 
 ;; use module::{member1, member2, member3};
 (use_list
-  (identifier) @local.definition)
+  (identifier) @local.import)
 (use_list 
   (scoped_identifier
-    name: (identifier) @local.definition))
+    name: (identifier) @local.import))
 
 
 ;; refs
@@ -326,7 +326,7 @@
 ;; if let _ = a {}
 ;;
 ;; the ident following the `=` is a ref
-;; the ident preceeding the `=` is a def
+;; the ident preceding the `=` is a def
 ;; while let _ = a {}
 (let_condition 
   "="
@@ -455,3 +455,9 @@
 ;; `T` is a ref
 (scoped_type_identifier
   path: (identifier) @local.reference)
+
+;; struct _ { field: Type }
+;; `Type` is a ref
+ (field_declaration
+   name: (_)
+   type: (type_identifier) @local.reference)

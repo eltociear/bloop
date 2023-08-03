@@ -2,7 +2,6 @@ import React, { useState } from 'react';
 import { RepoProvider, RepoUi, SyncStatus } from '../../types/general';
 import Tabs from '../Tabs';
 import RepoList from './index';
-import '../../index.css';
 
 export default {
   title: 'components/RepoList',
@@ -22,6 +21,8 @@ const mockRepos = [
     folderName: 'anastasiya1155',
     shortName: 'random-number-client',
     most_common_lang: 'TSX',
+    branches: [],
+    branch_filter: { select: [] },
   },
   {
     provider: RepoProvider.GitHub,
@@ -35,6 +36,8 @@ const mockRepos = [
     folderName: 'anastasiya1155',
     shortName: 'react-electron-todo-list',
     most_common_lang: 'TSX',
+    branches: [],
+    branch_filter: { select: [] },
   },
   {
     provider: RepoProvider.GitHub,
@@ -50,6 +53,8 @@ const mockRepos = [
     folderName: 'anastasiya1155',
     shortName: 'react-nodegui-todo-list',
     most_common_lang: 'TSX',
+    branches: [],
+    branch_filter: { select: [] },
   },
   {
     provider: RepoProvider.GitHub,
@@ -63,6 +68,8 @@ const mockRepos = [
     folderName: 'anastasiya1155',
     shortName: 'rocket-todo-app',
     most_common_lang: 'TSX',
+    branches: [],
+    branch_filter: { select: [] },
   },
   {
     provider: RepoProvider.GitHub,
@@ -78,6 +85,8 @@ const mockRepos = [
     folderName: 'anastasiya1155',
     shortName: 'search-job-helper-be',
     most_common_lang: 'TSX',
+    branches: [],
+    branch_filter: { select: [] },
   },
 ];
 const tabs = [{ title: 'Sync all repos' }, { title: 'Sync selected repos' }];
@@ -86,7 +95,7 @@ export const Default = () => {
   const [activeTab, setActiveTab] = useState(0);
   const [repos, setRepos] = useState<RepoUi[]>(mockRepos);
   return (
-    <div className="bg-gray-900 max-w-md2 p-6 w-full">
+    <div className="max-w-md2 p-6 w-full">
       <div className="flex flex-col overflow-auto">
         <div className="overflow-hidden flex-shrink-0">
           <Tabs
@@ -98,10 +107,10 @@ export const Default = () => {
           />
         </div>
         <RepoList
+          onSync={() => {}}
+          isLoading={false}
           repos={repos}
-          setRepos={setRepos}
           source="local"
-          activeTab={activeTab}
         />
       </div>
     </div>

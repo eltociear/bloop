@@ -23,16 +23,20 @@ regex_quoted_literal  = @{ (!(regex_quote | "\\") ~ ANY)* ~ (escape ~ regex_quot
 escape  = @{ "\\" ~ ANY }
 
 // Labels are broken out to rules so we can add arguments and options.
-label = _{ content | repo | org | symbol | path | lang }
+label = _{ content | repo | org | symbol | path | lang | branch }
 
 content = ${ "content:" ~ literal }
 repo = ${ "repo:" ~ literal }
 org = ${ "org:" ~ literal }
 symbol = ${ "symbol:" ~ literal }
 path = ${ "path:" ~ literal }
+branch = ${ "branch:" ~ literal }
 lang = ${ "lang:" ~ unquoted_literal }
 
-mode = _{ case | open | global_regex }
+mode = _{ case | open | global_regex | mode_selector }
+mode_selector = ${ "mode:" ~ ( grep | semantic ) }
+grep = ${ "grep" }
+semantic = ${ "semantic" }
 
 case = ${ "case:" ~ ( case_ignore | case_sensitive ) }
 case_ignore = { "ignore" }
@@ -52,4 +56,5 @@ group = !{ group_start ~ intersection ~ group_end }
 WHITESPACE = _{ " " }
 
 // natural language queries
-nl_query = _{ SOI ~ (label | mode | literal)* ~ EOI }
+raw_text = @{ (!WHITESPACE ~ ANY)+ }
+nl_query = _{ SOI ~ (label | mode | raw_text)* ~ EOI }

@@ -1,12 +1,34 @@
 import { MouseEvent, ReactElement } from 'react';
 import { Range } from '../../types/results';
 
+type HighlightedString = {
+  label: string;
+  highlight?: Range;
+};
+
+type ItemElement = {
+  label: ReactElement<any, any>;
+  highlight?: never;
+};
+
 type Props = {
   icon?: ReactElement<any, any>;
-  label: string;
   onClick?: (e: MouseEvent<HTMLButtonElement>) => void;
   isLast?: boolean;
-  highlight?: Range;
+  limitSectionWidth?: boolean;
+  type: 'link' | 'button';
+} & (HighlightedString | ItemElement);
+
+const typeMap = {
+  link: {
+    default: 'text-label-base hover:text-bg-main active:text-bg-main',
+    isLast: 'text-label-title',
+  },
+  button: {
+    default:
+      'px-2 py-1 rounded-4 hover:bg-bg-base-hover text-label-base hover:text-label-title',
+    isLast: 'text-label-base px-2 py-1 rounded-4',
+  },
 };
 
 const BreadcrumbSection = ({
@@ -15,6 +37,8 @@ const BreadcrumbSection = ({
   onClick,
   isLast,
   highlight,
+  type,
+  limitSectionWidth,
 }: Props) => {
   const getHighlight = () => {
     if (highlight) {
@@ -24,7 +48,7 @@ const BreadcrumbSection = ({
       return (
         <span>
           {left}
-          <span className="before:block before:absolute before:-inset-0.5 before:right-0 before:left-0 before:bg-secondary-500/25 relative before:rounded-l before:left-[-1.5px] before:rounded-r before:right-[-2px]">
+          <span className="bg-bg-highlight/25 rounded-4 text-label-base">
             {search}
           </span>
           {right}
@@ -35,13 +59,19 @@ const BreadcrumbSection = ({
   };
   return (
     <button
-      className={`flex items-center gap-1 hover:text-sky-500 cursor-pointer active:text-sky-500 ${
-        isLast ? 'text-gray-200' : 'text-gray-500'
-      }  transition-all duration-300 ease-in-bounce flex-shrink-0`}
+      className={`flex items-center gap-1 cursor-pointer ${
+        isLast ? typeMap[type].isLast : typeMap[type].default
+      } ${
+        limitSectionWidth ? 'max-w-[8rem] ellipsis' : ''
+      } transition-all duration-300 ease-in-bounce flex-shrink-0`}
       onClick={onClick}
     >
       {icon}
-      <span className="whitespace-nowrap">{getHighlight()}</span>
+      <span
+        className={`whitespace-nowrap ${limitSectionWidth ? 'ellipsis' : ''}`}
+      >
+        {getHighlight()}
+      </span>
     </button>
   );
 };

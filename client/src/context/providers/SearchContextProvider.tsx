@@ -5,71 +5,67 @@ import React, {
   useMemo,
   useState,
 } from 'react';
-import { FilterType, SearchHistoryItem, SearchType } from '../../types/general';
+import { FilterType, UITabType } from '../../types/general';
 import { SearchContext } from '../searchContext';
-import useAppNavigation from '../../hooks/useAppNavigation';
-import { UIContext } from '../uiContext';
-import { AnalyticsContext } from '../analyticsContext';
+import { TabsContext } from '../tabsContext';
 
 type Props = {
-  initialSearchHistory?: string[];
+  tab: UITabType;
 };
 
 export const SearchContextProvider = ({
   children,
-  initialSearchHistory,
+  tab,
 }: PropsWithChildren<Props>) => {
   const [inputValue, setInputValue] = useState('');
   const [filters, setFilters] = useState<FilterType[]>([]);
-  const [searchHistory, setSearchHistory] = useState<SearchHistoryItem[]>(
-    initialSearchHistory || [],
-  );
-  const [lastQueryTime, setLastQueryTime] = useState(3);
   const [globalRegex, setGlobalRegex] = useState(false);
-  const { navigatedItem } = useAppNavigation();
-  const { isGithubConnected } = useContext(UIContext);
-  const { isAnalyticsAllowed } = useContext(AnalyticsContext);
-  const [searchType, setSearchType] = useState(
-    isGithubConnected && isAnalyticsAllowed
-      ? navigatedItem?.searchType ?? SearchType.NL
-      : SearchType.REGEX,
+  const [selectedBranch, setSelectedBranch] = useState<string | null>(
+    tab.branch || null,
   );
+  const { updateTabBranch } = useContext(TabsContext);
 
   useEffect(() => {
-    setSearchType(
-      isGithubConnected && isAnalyticsAllowed
-        ? navigatedItem?.searchType ?? SearchType.NL
-        : SearchType.REGEX,
-    );
-  }, [navigatedItem?.searchType, isGithubConnected, isAnalyticsAllowed]);
+    updateTabBranch(tab.key, selectedBranch);
+  }, [selectedBranch, tab.key]);
 
-  const searchContextValue = useMemo(
+  const inputContextValue = useMemo(
     () => ({
       inputValue,
       setInputValue,
-      searchHistory,
-      setSearchHistory,
+    }),
+    [inputValue],
+  );
+  const filtersContextValue = useMemo(
+    () => ({
       filters,
       setFilters,
-      lastQueryTime,
-      setLastQueryTime,
+    }),
+    [filters],
+  );
+  const regexContextValue = useMemo(
+    () => ({
       globalRegex,
       setGlobalRegex,
-      searchType,
-      setSearchType,
     }),
-    [
-      inputValue,
-      filters,
-      searchHistory,
-      lastQueryTime,
-      globalRegex,
-      searchType,
-    ],
+    [globalRegex],
+  );
+  const branchContextValue = useMemo(
+    () => ({
+      selectedBranch,
+      setSelectedBranch,
+    }),
+    [selectedBranch],
   );
   return (
-    <SearchContext.Provider value={searchContextValue}>
-      {children}
-    </SearchContext.Provider>
+    <SearchContext.InputValue.Provider value={inputContextValue}>
+      <SearchContext.Filters.Provider value={filtersContextValue}>
+        <SearchContext.RegexEnabled.Provider value={regexContextValue}>
+          <SearchContext.SelectedBranch.Provider value={branchContextValue}>
+            {children}
+          </SearchContext.SelectedBranch.Provider>
+        </SearchContext.RegexEnabled.Provider>
+      </SearchContext.Filters.Provider>
+    </SearchContext.InputValue.Provider>
   );
 };

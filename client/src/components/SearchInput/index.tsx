@@ -2,20 +2,15 @@ import React, {
   ChangeEvent,
   useCallback,
   useContext,
-  useMemo,
   useRef,
   useState,
 } from 'react';
 import { useCombobox } from 'downshift';
 import throttle from 'lodash.throttle';
-import { ArrowRevert, Clipboard, TrashCan } from '../../icons';
-import { DropdownWithIcon } from '../Dropdown';
+import { useTranslation } from 'react-i18next';
 import { useArrowKeyNavigation } from '../../hooks/useArrowNavigationHook';
 import { SearchContext } from '../../context/searchContext';
-import Button from '../Button';
-import { copyToClipboard, parseFilters } from '../../utils';
-import { MenuListItemType } from '../ContextMenu';
-import { saveJsonToStorage, SEARCH_HISTORY_KEY } from '../../services/storage';
+import { parseFilters } from '../../utils';
 import { getAutocomplete } from '../../services/api';
 import {
   LangResult,
@@ -24,12 +19,10 @@ import {
 } from '../../types/results';
 import { mapResults } from '../../mappers/results';
 import useAppNavigation from '../../hooks/useAppNavigation';
-import { SearchType } from '../../types/general';
 import useKeyboardNavigation from '../../hooks/useKeyboardNavigation';
+import { UIContext } from '../../context/uiContext';
 import AutocompleteMenu from './AutocompleteMenu';
 import SearchTextInput from './SearchTextInput';
-
-const INPUT_POSITION_LEFT = 47;
 
 const getAutocompleteThrottled = throttle(
   async (
@@ -44,19 +37,16 @@ const getAutocompleteThrottled = throttle(
 );
 
 function SearchInput() {
-  const {
-    inputValue,
-    setInputValue,
-    searchHistory,
-    setFilters,
-    filters,
-    setSearchHistory,
-  } = useContext(SearchContext);
+  const { t } = useTranslation();
+  const { inputValue, setInputValue } = useContext(SearchContext.InputValue);
+  const { tab } = useContext(UIContext.Tab);
+  const { selectedBranch } = useContext(SearchContext.SelectedBranch);
+  const { setFilters, filters } = useContext(SearchContext.Filters);
+  const { globalRegex, setGlobalRegex } = useContext(
+    SearchContext.RegexEnabled,
+  );
   const [options, setOptions] = useState<SuggestionType[]>([]);
-  const [left, setLeft] = useState<number>(INPUT_POSITION_LEFT);
   const inputRef = useRef<HTMLInputElement>(null);
-  const { globalRegex, setGlobalRegex, searchType, setSearchType } =
-    useContext(SearchContext);
   const { navigateSearch, navigateRepoPath } = useAppNavigation();
   const arrowNavContainerRef = useArrowKeyNavigation({
     selectors: 'input, .arrow-navigate',
@@ -144,12 +134,14 @@ function SearchInput() {
             setFilters([]);
             return;
           }
-          if (searchType === SearchType.REGEX) {
-            getAutocompleteThrottled(state.inputValue, setOptions);
-          } else if (searchType === SearchType.NL) {
-            setOptions([]);
-            return;
+          let autocompleteQuery = state.inputValue;
+          if (selectedBranch) {
+            autocompleteQuery += ` branch:${selectedBranch}`;
           }
+          if (!state.inputValue.includes(`repo:${tab.name}`)) {
+            autocompleteQuery += ` repo:${tab.name}`;
+          }
+          getAutocompleteThrottled(autocompleteQuery, setOptions);
           const parsedFilters = parseFilters(state.inputValue);
           if (Object.entries(parsedFilters).some((filters) => filters.length)) {
             const newFilters = filters.map((filterItem) => ({
@@ -164,12 +156,12 @@ function SearchInput() {
               setFilters(newFilters);
             }
           }
-          const input = inputRef.current;
-          if (input) {
-            if (input.getBoundingClientRect().left) {
-              setLeft(input.getBoundingClientRect().left - 272);
-            }
-          }
+          // const input = inputRef.current;
+          // if (input) {
+          //   if (input.getBoundingClientRect().left) {
+          //     setLeft(input.getBoundingClientRect().left - 272);
+          //   }
+          // }
         }
       },
       items: options,
@@ -184,49 +176,17 @@ function SearchInput() {
     });
 
   const onSubmit = useCallback(
-    (val: string, forceSearchType?: SearchType) => {
-      const newSearchType = forceSearchType ?? searchType;
-      navigateSearch(val, newSearchType);
+    (val: string) => {
+      if (!val.trim()) {
+        return;
+      }
+      if (!val.includes(' branch:') && selectedBranch) {
+        val += ` branch:${selectedBranch}`;
+      }
+      navigateSearch(val);
       closeMenu();
-      setSearchHistory((prev) => {
-        const newHistory = [
-          { query: val, searchType: newSearchType },
-          ...prev,
-        ].slice(0, 4);
-        saveJsonToStorage(SEARCH_HISTORY_KEY, newHistory);
-        return newHistory;
-      });
     },
-    [searchType],
-  );
-
-  const handleClearHistory = useCallback(() => {
-    setSearchHistory([]);
-    saveJsonToStorage(SEARCH_HISTORY_KEY, []);
-  }, []);
-
-  const historyItems = useMemo(
-    () => [
-      ...searchHistory.map((s) => ({
-        text: typeof s === 'string' ? s : s.query,
-        type: MenuListItemType.DEFAULT,
-        onClick: () => {
-          const isOlderItem = typeof s === 'string';
-          setInputValue(isOlderItem ? s : s.query);
-          onSubmit(
-            isOlderItem ? s : s.query,
-            isOlderItem ? undefined : s.searchType,
-          );
-        },
-      })),
-      {
-        text: 'Clear search history',
-        type: MenuListItemType.DANGER,
-        icon: <TrashCan />,
-        onClick: handleClearHistory,
-      },
-    ],
-    [searchHistory, onSubmit, handleClearHistory],
+    [tab.name, selectedBranch],
   );
 
   return (
@@ -234,18 +194,11 @@ function SearchInput() {
       className="relative flex gap-2 flex-1 justify-center"
       ref={arrowNavContainerRef}
     >
-      <Button
-        variant="tertiary"
-        onlyIcon
-        title="Copy search query to clipboard"
-        onClick={() => copyToClipboard(inputValue)}
-      >
-        <Clipboard />
-      </Button>
       <div className="flex-1 max-w-3xl">
         <SearchTextInput
           type="search"
-          placeholder="What does this repo do?"
+          name="regex_search"
+          placeholder={t('Regex search...')}
           regex
           {...getInputProps(
             {
@@ -261,26 +214,14 @@ function SearchInput() {
             setGlobalRegex(!globalRegex);
           }}
           regexEnabled={globalRegex}
-          searchType={searchType}
-          onSearchTypeChanged={(st) => {
-            setSearchType(st);
-            setInputValue('');
-          }}
         />
       </div>
 
       <AutocompleteMenu
         getMenuProps={getMenuProps}
         getItemProps={getItemProps}
-        left={left}
         isOpen={isOpen && !!options.length}
         options={options}
-      />
-
-      <DropdownWithIcon
-        items={historyItems}
-        icon={<ArrowRevert />}
-        hint="Search history"
       />
     </div>
   );

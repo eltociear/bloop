@@ -2,12 +2,11 @@ use anyhow::Result;
 use regex::{Regex, RegexBuilder};
 use serde::Serialize;
 use smallvec::{smallvec, SmallVec};
-use utoipa::ToSchema;
 
 use crate::{indexes, symbol::Symbol};
 use std::ops::Range;
 
-#[derive(Serialize, ToSchema, Debug, PartialEq, Eq)]
+#[derive(Serialize, Debug, PartialEq, Eq)]
 pub struct SnippedFile {
     pub relative_path: String,
     pub repo_name: String,
@@ -16,7 +15,7 @@ pub struct SnippedFile {
     pub snippets: Vec<Snippet>,
 }
 
-#[derive(Serialize, ToSchema, Debug, PartialEq, Eq)]
+#[derive(Serialize, Debug, PartialEq, Eq)]
 pub struct Snippet {
     pub data: String,
     pub highlights: Vec<Range<usize>>,
@@ -28,7 +27,7 @@ pub struct Snippet {
 ///
 /// This doesn't store the actual text data itself, just the position information for simplified
 /// merging.
-#[derive(Serialize, ToSchema, Debug, PartialEq, Eq)]
+#[derive(Serialize, Debug, PartialEq, Eq)]
 pub struct Location {
     /// The subset's byte range in the original input string.
     pub byte_range: Range<usize>,
@@ -294,7 +293,7 @@ impl Snipper {
     }
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize)]
 pub struct HighlightedString {
     pub text: String,
 
@@ -320,8 +319,6 @@ impl HighlightedString {
 
 #[cfg(test)]
 mod tests {
-    use crate::text_range::{Point, TextRange};
-
     use super::*;
     use pretty_assertions::assert_eq;
     use regex::Regex;
@@ -624,42 +621,5 @@ mod tests {
 
         assert_eq!(s.text, "foo bar quux");
         assert_eq!(s.highlights.to_vec(), &[0..3, 4..8, 10..12]);
-    }
-
-    #[test]
-    fn highlight_only_symbols() {
-        let (text, line_end_indices) = with_line_ends("const beans = cool_beans()\n");
-        let doc = indexes::reader::ContentDocument {
-            content: text.into(),
-            line_end_indices,
-            symbol_locations: crate::symbol::SymbolLocations::Ctags(vec![Symbol {
-                kind: "variable".to_owned(),
-                range: TextRange {
-                    start: Point {
-                        byte: 6,
-                        line: 0,
-                        column: 6,
-                    },
-                    end: Point {
-                        byte: 11,
-                        line: 0,
-                        column: 11,
-                    },
-                },
-            }]),
-            ..Default::default()
-        };
-
-        let snipper = Snipper::default().find_symbols(true);
-
-        // do not highlight the "n" in "const" or "cool_beans"
-        // because those aren't symbols.
-        //
-        // within a snippet, the number of highlights should be
-        // equal to the number of symbols.
-        assert_eq!(
-            snipper.all_for_doc("n", &doc).unwrap().unwrap().snippets[0].highlights,
-            vec![9..10]
-        );
     }
 }

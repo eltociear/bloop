@@ -30,7 +30,7 @@ jobs:
         run: nix develop -c bash -c 'cargo --locked fmt -p bleep -- --check'
 
       - name: Clippy
-        run: nix develop -c bash -c 'cargo --locked clippy -p bleep'
+        run: nix develop -c bash -c 'cargo --locked clippy -p bleep --features=ee'
 
       - name: Tests
         run: nix develop -c bash -c 'cargo --locked test -p bleep --release'
@@ -52,17 +52,6 @@ jobs:
   #         profile: minimal
   #         toolchain: stable
   #         override: true
-
-  #     # Assume that self-hosted box already has universal ctags installed
-  #     # Can use nix when https://github.com/cachix/install-nix-action/issues/98
-  #     # has been resolved
-
-  #     # - uses: cachix/install-nix-action@v18
-  #     # - name: Install Universal Ctags
-  #     #   run: 'nix profile install nixpkgs#universal-ctags'
-
-  #     - name: Check ctags version
-  #       run: "which ctags; ctags --version"
 
   #     - uses: boa-dev/criterion-compare-action@v3.2.4
   #       env:

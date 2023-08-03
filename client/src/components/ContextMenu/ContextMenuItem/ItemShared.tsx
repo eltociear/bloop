@@ -4,7 +4,7 @@ import { DragVertical, TrashCan } from '../../../icons';
 import Button from '../../Button';
 
 export type ItemProps = {
-  text: string;
+  text: string | React.ReactElement;
   icon?: React.ReactElement;
   onClick?: (e: MouseEvent<HTMLButtonElement>) => void;
   onDelete?: () => void;
@@ -22,17 +22,17 @@ const ItemShared = ({
 }: ItemProps) => {
   return (
     <span
-      key={text}
-      className="p-2.5 group hover:bg-gray-700 text-gray-300 flex items-center justify-between rounded cursor-pointer transition-all duration-150 ease-in-bounce"
+      className={`p-2.5 group hover:bg-bg-base-hover active:bg-transparent text-label-base flex items-center justify-between 
+        rounded cursor-pointer transition-all duration-150 ease-in-bounce`}
       onClick={onClick}
     >
       <span className="flex items-center gap-2">
-        <span className="text-gray-500">
+        <span className="text-label-muted">
           <DragVertical />
         </span>
         <span className="flex flex-col">
           <TextField value={text} icon={icon} />
-          <span className="text-gray-500 text-xs">
+          <span className="text-label-muted text-xs">
             {annotations} annotations
           </span>
         </span>

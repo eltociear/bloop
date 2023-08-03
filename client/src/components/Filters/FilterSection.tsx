@@ -7,6 +7,7 @@ import {
   useState,
 } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
+import { Trans, useTranslation } from 'react-i18next';
 import TextInput from '../TextInput';
 import Checkbox from '../Checkbox';
 import { FILTER_SECTION_ANIMATION } from '../../consts/animations';
@@ -43,6 +44,7 @@ const FiltersSection = ({
   onSelectAll,
   singleSelect,
 }: Props) => {
+  const { t } = useTranslation();
   const [filter, setFilter] = useState('');
   const [filteredItems, setFilteredItems] = useState(items);
 
@@ -67,7 +69,7 @@ const FiltersSection = ({
   );
 
   return (
-    <div className="text-gray-300 w-full border-b border-gray-800">
+    <div className="text-label-title w-full border-b border-bg-border">
       <FilterTitle
         label={title}
         numberSelected={items.filter((i) => i.checked).length}
@@ -88,8 +90,8 @@ const FiltersSection = ({
                 value={filter}
                 onChange={handleFilter}
                 name={name + '-filter'}
-                variant="filled"
-                placeholder={`Filter ${name}...`}
+                variant="outlined"
+                placeholder={t(`Filter ${name}...`)}
               />
               {filteredItems.length ? (
                 <>
@@ -100,12 +102,12 @@ const FiltersSection = ({
                       label={
                         <span
                           className={`${
-                            allSelected
-                              ? 'body-s text-gray-300'
-                              : 'caption text-gray-500'
+                            allSelected ? 'body-s' : 'caption'
                           } whitespace-nowrap overflow-hidden`}
                         >
-                          {allSelected ? 'Deselect all' : 'Select all'}
+                          <Trans>
+                            {allSelected ? 'Deselect all' : 'Select all'}
+                          </Trans>
                         </span>
                       }
                       onChange={onSelectAll}
@@ -127,9 +129,13 @@ const FiltersSection = ({
                 </>
               ) : (
                 <div className="text-center">
-                  <p className="body-s text-gray-300 pb-2">No results...</p>
-                  <p className="caption text-gray-500">
-                    Nothing matched your search. Try a different combination!
+                  <p className="body-s text-label-title pb-2">
+                    <Trans>No results...</Trans>
+                  </p>
+                  <p className="caption text-label-muted">
+                    <Trans>
+                      Nothing matched your search. Try a different combination!
+                    </Trans>
                   </p>
                 </div>
               )}

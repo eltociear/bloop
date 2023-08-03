@@ -5,9 +5,9 @@ import {
   FileItem,
   FileResItem,
   RangeLine,
+  RefDefDataItem,
   RepoItem,
   SuggestionsResponse,
-  TokenInfoItem,
   TokenInfoResponse,
 } from '../types/api';
 import {
@@ -17,8 +17,6 @@ import {
   RepoResult,
   ResultItemType,
   ResultType,
-  TokenInfo,
-  TokenInfoFile,
 } from '../types/results';
 import { FileTreeFileType } from '../types';
 import { sortFiles } from '../utils/file';
@@ -139,7 +137,6 @@ const mapFileTree = (siblings: DirectoryEntry[], relativePath: string) => {
       lang:
         item.entry_data !== 'Directory' ? item.entry_data.File.lang : undefined,
       children: [],
-      selected: item.currentFile,
     }))
     .sort(sortFiles);
 };
@@ -152,30 +149,64 @@ export const mapFileResult = (fileItem: FileItem) => {
     code: fileItem.data.contents,
     hoverableRanges: [],
     repoName: fileItem.data.repo_name,
-    fileTree: mapFileTree(
-      fileItem.data.siblings || [],
-      fileItem.data.relative_path,
-    ),
+    size: fileItem.data.size,
+    loc: fileItem.data.sloc,
   };
 };
 
-const mapTokenInfo = (tokenInfoItem: TokenInfoItem[]): TokenInfoFile[] => {
-  return tokenInfoItem?.map((definition) => {
+export const mapTokenInfo = (
+  tokenInfo: TokenInfoResponse['data'],
+  path: string,
+) => {
+  const map: {
+    references: Record<string, any>;
+    definitions: Record<string, any>;
+  } = {
+    references: [],
+    definitions: [],
+  };
+  const mapItem = (td: RefDefDataItem) => {
+    const trimmed = td.snippet.data.trimStart();
+    const lengthDiff = td.snippet.data.length - trimmed.length;
     return {
-      path: definition.file,
-      items: definition.data.map((item) => ({
-        code: item.snippet.data.replace('\n', '').trim(),
-        line: item.start.line,
-      })),
+      ...td,
+      snippet: {
+        ...td.snippet,
+        data: trimmed,
+        highlights: td.snippet.highlights.map((h) => {
+          return { start: h.start - lengthDiff, end: h.end - lengthDiff };
+        }),
+        tokenRange: td.snippet.highlights[0],
+      },
     };
+  };
+  tokenInfo.forEach((t) => {
+    const references = t.data.filter((d) => d.kind === 'reference');
+    if (references.length) {
+      map.references[t.file] = [
+        ...(map.references[t.file] || []),
+        ...references.map(mapItem),
+      ];
+    }
+    const definitions = t.data.filter((d) => d.kind === 'definition');
+    if (definitions.length) {
+      map.definitions[t.file] = [
+        ...(map.definitions[t.file] || []),
+        ...definitions.map(mapItem),
+      ];
+    }
   });
-};
 
-export const mapTokenInfoData = (tokenInfo: TokenInfoResponse): TokenInfo => {
+  const arrayFromObject = (obj: Record<string, any>) =>
+    Object.entries(obj)
+      .map(([file, data]) => ({
+        file,
+        data,
+      }))
+      .sort((a, b) => (a.file === path ? -1 : b.file === path ? 1 : 0));
+
   return {
-    definitions: tokenInfo.definitions
-      ? mapTokenInfo(tokenInfo.definitions)
-      : [],
-    references: tokenInfo.references ? mapTokenInfo(tokenInfo.references) : [],
+    references: arrayFromObject(map.references),
+    definitions: arrayFromObject(map.definitions),
   };
 };

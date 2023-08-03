@@ -1,7 +1,7 @@
 use pest::{iterators::Pair, Parser};
 use regex::Regex;
 use smallvec::{smallvec, SmallVec};
-use std::{borrow::Cow, mem};
+use std::{borrow::Cow, collections::HashSet, mem};
 
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct Query<'a> {
@@ -13,6 +13,7 @@ pub struct Query<'a> {
     pub repo: Option<Literal<'a>>,
     pub path: Option<Literal<'a>>,
     pub lang: Option<Cow<'a, str>>,
+    pub branch: Option<Literal<'a>>,
     pub target: Option<Target<'a>>,
 }
 
@@ -22,24 +23,79 @@ pub enum Target<'a> {
     Content(Literal<'a>),
 }
 
-#[derive(Default, Clone, Debug, PartialEq, Eq)]
-pub struct NLQuery<'a> {
-    pub repo: Option<Literal<'a>>,
-    pub lang: Option<Cow<'a, str>>,
+#[derive(Debug, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
+pub enum ParsedQuery<'a> {
+    Semantic(SemanticQuery<'a>),
+    Grep(Vec<Query<'a>>),
+}
+
+impl<'a> ParsedQuery<'a> {
+    pub fn into_semantic(self) -> Option<SemanticQuery<'a>> {
+        match self {
+            Self::Semantic(q) => Some(q),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Default, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SemanticQuery<'a> {
+    pub repos: HashSet<Literal<'a>>,
+    pub paths: HashSet<Literal<'a>>,
+    pub langs: HashSet<Cow<'a, str>>,
+    pub branch: HashSet<Literal<'a>>,
     pub target: Option<Literal<'a>>,
 }
 
-impl<'a> NLQuery<'a> {
-    pub fn repo(&self) -> Option<&Cow<'_, str>> {
-        self.repo.as_ref().and_then(|t| t.as_plain())
+impl<'a> SemanticQuery<'a> {
+    pub fn repos(&'a self) -> impl Iterator<Item = Cow<'a, str>> {
+        self.repos.iter().filter_map(|t| t.as_plain())
     }
 
-    pub fn lang(&self) -> Option<&Cow<'_, str>> {
-        self.lang.as_ref()
+    pub fn paths(&'a self) -> impl Iterator<Item = Cow<'a, str>> {
+        self.paths.iter().filter_map(|t| t.as_plain())
     }
 
-    pub fn target(&self) -> Option<&Cow<'_, str>> {
+    pub fn langs(&'a self) -> impl Iterator<Item = Cow<'a, str>> {
+        self.langs.iter().cloned()
+    }
+
+    pub fn target(&self) -> Option<Cow<'a, str>> {
         self.target.as_ref().and_then(|t| t.as_plain())
+    }
+
+    pub fn branch(&'a self) -> impl Iterator<Item = Cow<'a, str>> {
+        self.branch.iter().filter_map(|t| t.as_plain())
+    }
+
+    // TODO (@calyptobai): This is a quirk of the current conversation logic. We take only the
+    // first branch because the UX operates on a single "current" branch. We can likely update
+    // `SemanticQuery` to remove multiple branches altogether.
+    pub fn first_branch(&self) -> Option<Cow<'_, str>> {
+        self.branch.iter().next().map(|t| t.clone().unwrap())
+    }
+
+    pub fn from_str(query: String, repo_ref: String) -> Self {
+        Self {
+            target: Some(Literal::Plain(Cow::Owned(query))),
+            repos: [Literal::Plain(Cow::Owned(repo_ref))].into(),
+            ..Default::default()
+        }
+    }
+
+    pub fn into_owned(self) -> SemanticQuery<'static> {
+        SemanticQuery {
+            repos: self.repos.into_iter().map(Literal::into_owned).collect(),
+            paths: self.paths.into_iter().map(Literal::into_owned).collect(),
+            langs: self
+                .langs
+                .into_iter()
+                .map(|c| c.into_owned().into())
+                .collect(),
+            branch: self.branch.into_iter().map(Literal::into_owned).collect(),
+            target: self.target.map(Literal::into_owned),
+        }
     }
 }
 
@@ -56,6 +112,7 @@ impl<'a> Query<'a> {
             repo: rhs.repo.or(self.repo),
             path: rhs.path.or(self.path),
             lang: rhs.lang.or(self.lang),
+            branch: rhs.branch.or(self.branch),
 
             target: match (self.target, rhs.target) {
                 (Some(Target::Content(lhs)), Some(Target::Content(rhs))) => {
@@ -109,7 +166,8 @@ impl<'a> Query<'a> {
     }
 
     pub fn is_case_sensitive(&self) -> bool {
-        self.case_sensitive.unwrap_or(true)
+        // defaults to false if unset
+        self.case_sensitive.unwrap_or_default()
     }
 
     fn set_global_regex(&mut self, value: Option<bool>) {
@@ -160,18 +218,26 @@ impl<'a> Target<'a> {
 #[grammar = "query/grammar.pest"] // relative to src
 struct PestParser;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, PartialEq, thiserror::Error)]
 pub enum ParseError {
     #[error("parse error: {0:?}")]
     Pest(#[from] Box<pest::error::Error<Rule>>),
     #[error("unparsed token: {0:?}")]
     UnparsedToken(String),
+    #[error("multiple mode designators")]
+    MultiMode,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Hash)]
+#[derive(Debug, PartialEq, Eq, Clone, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Literal<'a> {
     Plain(Cow<'a, str>),
     Regex(Cow<'a, str>),
+}
+
+impl From<&String> for Literal<'static> {
+    fn from(value: &String) -> Self {
+        Literal::Plain(value.to_owned().into())
+    }
 }
 
 impl<'a> Default for Literal<'a> {
@@ -180,7 +246,7 @@ impl<'a> Default for Literal<'a> {
     }
 }
 
-impl Literal<'_> {
+impl<'a> Literal<'a> {
     fn join_as_regex(self, rhs: Self) -> Self {
         let lhs = self.regex_str();
         let rhs = rhs.regex_str();
@@ -197,9 +263,9 @@ impl Literal<'_> {
     ///
     /// If this literal is a regex, it is returned as-is. If it is a plain text literal, it is
     /// escaped first before returning.
-    pub fn regex_str(&self) -> Cow<'_, str> {
+    pub fn regex_str(&self) -> Cow<'a, str> {
         match self {
-            Self::Plain(text) => Cow::Owned(regex::escape(text)),
+            Self::Plain(text) => regex::escape(text).into(),
             Self::Regex(r) => r.clone(),
         }
     }
@@ -208,9 +274,9 @@ impl Literal<'_> {
         Regex::new(&self.regex_str())
     }
 
-    pub fn as_plain(&self) -> Option<&Cow<str>> {
+    pub fn as_plain(&self) -> Option<Cow<'a, str>> {
         match self {
-            Self::Plain(p) => Some(p),
+            Self::Plain(p) => Some(p.clone()),
             Self::Regex(..) => None,
         }
     }
@@ -219,6 +285,20 @@ impl Literal<'_> {
     fn make_regex(&mut self) {
         *self = match std::mem::take(self) {
             Self::Plain(s) | Self::Regex(s) => Self::Regex(s),
+        }
+    }
+
+    pub fn unwrap(self) -> Cow<'a, str> {
+        match self {
+            Literal::Plain(v) => v,
+            Literal::Regex(v) => v,
+        }
+    }
+
+    pub fn into_owned(self) -> Literal<'static> {
+        match self {
+            Literal::Plain(cow) => Literal::Plain(Cow::Owned(cow.into_owned())),
+            Literal::Regex(cow) => Literal::Regex(Cow::Owned(cow.into_owned())),
         }
     }
 }
@@ -230,6 +310,7 @@ impl<'a> From<Pair<'a, Rule>> for Literal<'a> {
             Rule::quoted_literal => Self::Plain(unescape(pair.as_str(), '"').into()),
             Rule::single_quoted_literal => Self::Plain(unescape(pair.as_str(), '\'').into()),
             Rule::regex_quoted_literal => Self::Regex(unescape(pair.as_str(), '/').into()),
+            Rule::raw_text => Self::Plain(pair.as_str().trim().into()),
             _ => unreachable!(),
         }
     }
@@ -274,6 +355,12 @@ fn unescape(s: &str, term: char) -> String {
     result
 }
 
+#[derive(Debug, PartialEq, Clone, Eq)]
+enum ForceParsingAs {
+    Grep,
+    Semantic,
+}
+
 #[derive(Debug, PartialEq, Clone)]
 enum Expr<'a> {
     Or(Vec<Expr<'a>>),
@@ -285,10 +372,15 @@ enum Expr<'a> {
     Path(Literal<'a>),
     Lang(Cow<'a, str>),
     Content(Literal<'a>),
+    Branch(Literal<'a>),
 
     CaseSensitive(bool),
     Open(bool),
     GlobalRegex(bool),
+
+    /// This is only parsed so we it doesn't mix with the actual query
+    /// Not actively used anywhere.
+    GlobalMode(ForceParsingAs),
 }
 
 impl<'a> Expr<'a> {
@@ -306,6 +398,7 @@ impl<'a> Expr<'a> {
             Rule::repo => Repo(Literal::from(pair.into_inner().next().unwrap())),
             Rule::symbol => Symbol(Literal::from(pair.into_inner().next().unwrap())),
             Rule::org => Org(Literal::from(pair.into_inner().next().unwrap())),
+            Rule::branch => Branch(Literal::from(pair.into_inner().next().unwrap())),
             Rule::lang => Lang(pair.into_inner().as_str().into()),
 
             Rule::open => {
@@ -341,6 +434,20 @@ impl<'a> Expr<'a> {
                 match inner.as_str() {
                     "true" => GlobalRegex(true),
                     "false" => GlobalRegex(false),
+                    _ => unreachable!(),
+                }
+            }
+
+            Rule::mode_selector => {
+                // Avoid parsing this flag unless it's at the top level.
+                if !top_level {
+                    return Err(pair);
+                }
+
+                let inner = pair.into_inner().next().unwrap();
+                match inner.as_str() {
+                    "grep" => GlobalMode(ForceParsingAs::Grep),
+                    "semantic" => GlobalMode(ForceParsingAs::Semantic),
                     _ => unreachable!(),
                 }
             }
@@ -394,6 +501,7 @@ pub fn parse(query: &str) -> Result<Vec<Query<'_>>, ParseError> {
     // Find and redistribute global options.
     let global_regex = qs.iter().fold(None, |a, e| e.global_regex.or(a));
     let case_sensitive = qs.iter().fold(None, |a, e| e.case_sensitive.or(a));
+
     for q in qs.iter_mut() {
         q.set_global_regex(global_regex);
         q.case_sensitive = case_sensitive;
@@ -402,21 +510,34 @@ pub fn parse(query: &str) -> Result<Vec<Query<'_>>, ParseError> {
     Ok(qs.into_vec())
 }
 
-pub fn parse_nl(query: &str) -> Result<NLQuery<'_>, ParseError> {
+pub fn parse_nl(query: &str) -> Result<ParsedQuery<'_>, ParseError> {
     let pairs = PestParser::parse(Rule::nl_query, query).map_err(Box::new)?;
 
-    let mut repo = None;
-    let mut lang = None;
+    let mut repos = HashSet::new();
+    let mut paths = HashSet::new();
+    let mut langs = HashSet::new();
+    let mut branch = HashSet::new();
     let mut target: Option<Literal> = None;
+    let mut force_parsing_as = None;
     for pair in pairs {
         match pair.as_rule() {
-            Rule::repo => repo = Some(Literal::from(pair.into_inner().next().unwrap())),
-            Rule::lang => {
-                lang = Some(super::languages::parse_alias(
-                    pair.into_inner().as_str().into(),
-                ))
+            Rule::repo => {
+                let item = Literal::from(pair.into_inner().next().unwrap());
+                let _ = repos.insert(item);
             }
-            Rule::unquoted_literal | Rule::quoted_literal | Rule::single_quoted_literal => {
+            Rule::path => {
+                let item = Literal::from(pair.into_inner().next().unwrap());
+                let _ = paths.insert(item);
+            }
+            Rule::branch => {
+                let item = Literal::from(pair.into_inner().next().unwrap());
+                let _ = branch.insert(item);
+            }
+            Rule::lang => {
+                let item = super::languages::parse_alias(pair.into_inner().as_str().into());
+                let _ = langs.insert(item);
+            }
+            Rule::raw_text => {
                 let rhs = Literal::from(pair);
                 if let Some(t) = target {
                     target = t.join_as_plain(rhs);
@@ -424,19 +545,42 @@ pub fn parse_nl(query: &str) -> Result<NLQuery<'_>, ParseError> {
                     target = Some(rhs);
                 }
             }
+            Rule::mode_selector => {
+                let inner = pair.into_inner().next().unwrap();
+                match inner.as_str() {
+                    "grep" if force_parsing_as.is_none() => {
+                        force_parsing_as = Some(ForceParsingAs::Grep);
+                    }
+                    "semantic" if force_parsing_as.is_none() => {
+                        force_parsing_as = Some(ForceParsingAs::Semantic);
+                    }
+                    _ => return Err(ParseError::MultiMode),
+                };
+            }
             _ => {}
         }
     }
 
-    let qs = NLQuery { repo, lang, target };
-
-    Ok(qs)
+    match force_parsing_as {
+        Some(ForceParsingAs::Grep) => parse(query).map(ParsedQuery::Grep),
+        _ => Ok(ParsedQuery::Semantic(SemanticQuery {
+            repos,
+            paths,
+            langs,
+            branch,
+            target,
+        })),
+    }
 }
 
 fn flatten(root: Expr<'_>) -> SmallVec<[Query<'_>; 1]> {
     match root {
         Expr::Repo(repo) => smallvec![Query {
             repo: Some(repo),
+            ..Default::default()
+        }],
+        Expr::Branch(branch) => smallvec![Query {
+            branch: Some(branch),
             ..Default::default()
         }],
         Expr::Org(org) => smallvec![Query {
@@ -473,6 +617,10 @@ fn flatten(root: Expr<'_>) -> SmallVec<[Query<'_>; 1]> {
             global_regex: Some(flag),
             ..Default::default()
         }],
+        Expr::GlobalMode(_) => smallvec![Query {
+            // we don't propagate this flag down to the query level!
+            ..Default::default()
+        }],
 
         // Simple merge
         Expr::Or(exprs) => {
@@ -500,6 +648,17 @@ mod tests {
         assert_eq!(
             parse("ParseError").unwrap(),
             vec![Query {
+                target: Some(Target::Content(Literal::Plain("ParseError".into()))),
+                ..Query::default()
+            }],
+        );
+
+        assert_eq!(
+            parse("org:bloopai repo:enterprise-search branch:origin/main ParseError").unwrap(),
+            vec![Query {
+                repo: Some(Literal::Plain("enterprise-search".into())),
+                org: Some(Literal::Plain("bloopai".into())),
+                branch: Some(Literal::Plain("origin/main".into())),
                 target: Some(Target::Content(Literal::Plain("ParseError".into()))),
                 ..Query::default()
             }],
@@ -540,6 +699,64 @@ mod tests {
                 target: Some(Target::Content(Literal::Plain("Parse".into()))),
                 ..Query::default()
             }],
+        );
+    }
+
+    #[test]
+    fn test_force_parsing_mode_from_language() {
+        assert_eq!(
+            parse("repo:foo ParseError or repo:bar mode:grep").unwrap(),
+            vec![
+                Query {
+                    repo: Some(Literal::Plain("foo".into())),
+                    target: Some(Target::Content(Literal::Plain("ParseError".into()))),
+                    ..Query::default()
+                },
+                Query {
+                    repo: Some(Literal::Plain("bar".into())),
+                    ..Query::default()
+                },
+            ],
+        );
+
+        assert_eq!(
+            parse_nl("repo:foo ParseError or repo:bar mode:grep"),
+            Ok(ParsedQuery::Grep(vec![
+                Query {
+                    repo: Some(Literal::Plain("foo".into())),
+                    target: Some(Target::Content(Literal::Plain("ParseError".into()))),
+                    ..Query::default()
+                },
+                Query {
+                    repo: Some(Literal::Plain("bar".into())),
+                    ..Query::default()
+                },
+            ])),
+        );
+
+        assert_eq!(
+            parse("repo:foo ParseError or repo:bar").unwrap(),
+            vec![
+                Query {
+                    repo: Some(Literal::Plain("foo".into())),
+                    target: Some(Target::Content(Literal::Plain("ParseError".into()))),
+                    ..Query::default()
+                },
+                Query {
+                    repo: Some(Literal::Plain("bar".into())),
+                    ..Query::default()
+                },
+            ],
+        );
+
+        assert_eq!(
+            parse_nl("repo:bar or repo:foo ParseError mode:grep mode:semantic"),
+            Err(ParseError::MultiMode)
+        );
+
+        assert_eq!(
+            parse_nl("repo:bar or repo:foo ParseError mode:semantic mode:grep"),
+            Err(ParseError::MultiMode)
         );
     }
 
@@ -951,41 +1168,87 @@ mod tests {
     }
 
     #[test]
-    fn test_nl_parse() {
+    fn nl_parse() {
         assert_eq!(
             parse_nl("what is background color? lang:tsx repo:bloop").unwrap(),
-            NLQuery {
+            ParsedQuery::Semantic(SemanticQuery {
                 target: Some(Literal::Plain("what is background color?".into())),
-                lang: Some("tsx".into()),
-                repo: Some(Literal::Plain("bloop".into())),
-            },
+                langs: ["tsx".into()].into(),
+                repos: [Literal::Plain("bloop".into())].into(),
+                paths: [].into(),
+                branch: [].into()
+            }),
         );
     }
 
     #[test]
-    fn test_nl_consume_flags() {
+    fn nl_parse_dedup_similar_filters() {
+        let ParsedQuery::Semantic(q) =
+            parse_nl("what is background color? lang:tsx repo:bloop repo:bloop").unwrap() else {
+            panic!("down with this sorta thing")
+        };
+        assert_eq!(q.repos().count(), 1);
+    }
+
+    #[test]
+    fn nl_parse_multiple_filters() {
+        assert_eq!(
+            parse_nl("what is background color? lang:tsx lang:ts repo:bloop repo:bar path:server/bleep repo:baz")
+                .unwrap(),
+            ParsedQuery::Semantic(SemanticQuery {
+                target: Some(Literal::Plain("what is background color?".into())),
+                langs: ["tsx".into(), "typescript".into()].into(),
+                branch: [].into(),
+                repos: [
+                    Literal::Plain("bloop".into()),
+                    Literal::Plain("bar".into()),
+                    Literal::Plain("baz".into())
+                ]
+                .into(),
+                paths: [Literal::Plain("server/bleep".into())].into(),
+            })
+        );
+    }
+
+    #[test]
+    fn nl_consume_flags() {
         assert_eq!(
             parse_nl(
                 "what is background color? lang:tsx repo:bloop org:bloop symbol:foo open:true"
             )
             .unwrap(),
-            NLQuery {
+            ParsedQuery::Semantic(SemanticQuery {
                 target: Some(Literal::Plain("what is background color?".into())),
-                lang: Some("tsx".into()),
-                repo: Some(Literal::Plain("bloop".into())),
-            },
+                langs: ["tsx".into()].into(),
+                repos: [Literal::Plain("bloop".into())].into(),
+                paths: [].into(),
+                branch: [].into(),
+            })
         );
 
         assert_eq!(
-            parse_nl("case:ignore why are languages excluded from ctags?").unwrap(),
-            NLQuery {
+            parse_nl("case:ignore why are languages excluded from ctags? branch:main").unwrap(),
+            ParsedQuery::Semantic(SemanticQuery {
                 target: Some(Literal::Plain(
                     "why are languages excluded from ctags?".into()
                 )),
-                lang: None,
-                repo: None,
-            },
+                branch: [Literal::Plain("main".into())].into(),
+                ..Default::default()
+            })
         );
+    }
+
+    // NL queries should permit arbitrary text in the `target` field, such as `(` and `|`
+    #[test]
+    fn nl_parse_arbitrary_text() {
+        let queries = [
+            "explain analytics (in the frontend)",
+            "repo:bloop path:server start the server",
+            ":613330{})/.[|^%@!Z",
+        ];
+        for q in queries {
+            assert!(parse_nl(q).is_ok());
+        }
     }
 
     #[test]

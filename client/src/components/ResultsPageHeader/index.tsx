@@ -1,6 +1,6 @@
-import React, { useContext, useState } from 'react';
+import React, { useContext } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
 import { Collapsed, Expanded } from '../../icons';
-import { MenuListItemType } from '../../components/ContextMenu';
 import Tabs from '../../components/Tabs';
 import SkeletonItem from '../../components/SkeletonItem';
 import { UIContext } from '../../context/uiContext';
@@ -12,27 +12,15 @@ type Props = {
   loading?: boolean;
 };
 
-const dropdownItems = [
-  {
-    text: 'Best match',
-    type: MenuListItemType.DEFAULT,
-  },
-  {
-    text: 'Last indexed',
-    type: MenuListItemType.DEFAULT,
-  },
-  {
-    text: 'Frequency',
-    type: MenuListItemType.DEFAULT,
-  },
-];
-
 const PageHeader = ({
   resultsNumber,
   showCollapseControls,
   loading,
 }: Props) => {
-  const { symbolsCollapsed, setSymbolsCollapsed } = useContext(UIContext);
+  const { t } = useTranslation();
+  const { symbolsCollapsed, setSymbolsCollapsed } = useContext(
+    UIContext.Symbols,
+  );
   return (
     <div className="w-full flex justify-between items-center mb-5 select-none">
       <div>
@@ -41,17 +29,17 @@ const PageHeader = ({
             <SkeletonItem />
           </div>
         ) : (
-          <h4>{resultsNumber ? 'Results' : 'No results'}</h4>
+          <h4 className="text-label-title">
+            <Trans>{resultsNumber ? 'Results' : 'No results'}</Trans>
+          </h4>
         )}
         {loading ? (
           <div className="h-4 w-48">
             <SkeletonItem />
           </div>
         ) : (
-          <p className="body-s text-gray-500">
-            {resultsNumber
-              ? `Showing ${resultsNumber} result${resultsNumber > 1 ? 's' : ''}`
-              : 'Nothing matched your search. Try a different combination!'}
+          <p className="body-s text-label-muted">
+            {t('Showing # result', { count: resultsNumber })}
           </p>
         )}
       </div>
@@ -71,7 +59,6 @@ const PageHeader = ({
         ) : (
           ''
         )}
-        {/*<Dropdown items={dropdownItems} btnHint="Sort by:" />*/}
       </div>
     </div>
   );

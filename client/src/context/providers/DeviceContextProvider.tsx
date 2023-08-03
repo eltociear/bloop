@@ -1,7 +1,6 @@
-import { PropsWithChildren, useContext, useEffect } from 'react';
+import { PropsWithChildren, useEffect } from 'react';
 import * as Sentry from '@sentry/react';
 import { DeviceContext, DeviceContextType } from '../deviceContext';
-import { AnalyticsContext } from '../analyticsContext';
 import { initializeSentry } from '../../utils/services';
 
 type Props = {
@@ -12,15 +11,11 @@ export const DeviceContextProvider = ({
   children,
   deviceContextValue,
 }: PropsWithChildren<Props>) => {
-  const { isAnalyticsAllowed } = useContext(AnalyticsContext);
-
   useEffect(() => {
-    deviceContextValue.invokeTauriCommand(
-      isAnalyticsAllowed ? 'enable_telemetry' : 'disable_telemetry',
-    );
-    if (isAnalyticsAllowed && import.meta.env.SENTRY_DSN_FE) {
+    deviceContextValue.invokeTauriCommand('enable_telemetry');
+    if (deviceContextValue.envConfig.sentry_dsn_fe) {
       initializeSentry(
-        import.meta.env.SENTRY_DSN_FE,
+        deviceContextValue.envConfig,
         deviceContextValue.release,
       );
     } else {
@@ -29,7 +24,10 @@ export const DeviceContextProvider = ({
         client.close();
       }
     }
-  }, [isAnalyticsAllowed, deviceContextValue.invokeTauriCommand]);
+  }, [
+    deviceContextValue.invokeTauriCommand,
+    deviceContextValue.envConfig.sentry_dsn_fe,
+  ]);
 
   return (
     <DeviceContext.Provider value={deviceContextValue}>

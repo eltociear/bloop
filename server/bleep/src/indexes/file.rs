@@ -1,316 +1,126 @@
 use std::{
     collections::{HashMap, HashSet},
-    ops::Not,
-    path::{Path, PathBuf, MAIN_SEPARATOR},
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
 };
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Result};
 use async_trait::async_trait;
-use dashmap::mapref::entry::Entry;
-use once_cell::sync::Lazy;
-use regex::Regex;
-use smallvec::SmallVec;
+use rayon::prelude::*;
+use scc::hash_map::Entry;
 use tantivy::{
     collector::TopDocs,
     doc,
-    query::{BooleanQuery, QueryParser, TermQuery},
-    schema::{
-        BytesOptions, Field, IndexRecordOption, Schema, Term, TextFieldIndexing, TextOptions, FAST,
-        STORED, STRING,
-    },
+    query::{BooleanQuery, Query, QueryParser, TermQuery},
+    schema::{IndexRecordOption, Schema, Term},
     IndexWriter,
 };
 use tokenizers as _;
 use tokio::runtime::Handle;
-use tracing::{debug, info, trace, warn};
+use tracing::{info, trace, warn};
+
+pub use super::schema::File;
 
 #[cfg(feature = "debug")]
-use {
-    histogram::Histogram,
-    std::{sync::RwLock, time::Instant},
-};
+use std::time::Instant;
 
 use super::{
-    reader::{ContentDocument, ContentReader},
+    reader::{ContentDocument, ContentReader, FileDocument, FileReader},
     DocumentRead, Indexable, Indexer,
 };
 use crate::{
+    background::SyncPipes,
+    cache::{FileCache, FileCacheSnapshot},
     intelligence::TreeSitterFile,
-    repo::{FileCache, RepoMetadata, RepoRef, Repository},
-    semantic::Semantic,
+    query::compiler::{case_permutations, trigrams},
+    repo::{iterator::*, RepoMetadata, RepoRef, Repository},
     symbol::SymbolLocations,
-    Configuration,
 };
 
 struct Workload<'a> {
-    entry_disk_path: PathBuf,
     repo_disk_path: &'a Path,
     repo_ref: String,
     repo_name: &'a str,
     repo_metadata: &'a RepoMetadata,
-    cache: &'a FileCache,
+    file_cache: &'a FileCache<'a>,
+    cache_snapshot: &'a FileCacheSnapshot,
+    dir_entry: RepoDirEntry,
 }
-
-#[derive(Clone)]
-pub struct File {
-    config: Arc<Configuration>,
-    schema: Schema,
-    semantic: Option<Semantic>,
-
-    #[cfg(feature = "debug")]
-    histogram: Arc<RwLock<Histogram>>,
-
-    // Path to the indexed file or directory on disk
-    pub entry_disk_path: Field,
-    // Path to the root of the repo on disk
-    pub repo_disk_path: Field,
-    // Path to the file, relative to the repo root
-    pub relative_path: Field,
-
-    // Unique repo identifier, of the form:
-    //  local: local//path/to/repo
-    // github: github.com/org/repo
-    pub repo_ref: Field,
-
-    // Indexed repo name, of the form:
-    //  local: repo
-    // github: github.com/org/repo
-    pub repo_name: Field,
-
-    pub content: Field,
-    pub line_end_indices: Field,
-
-    // a flat list of every symbol's text, for searching, e.g.: ["File", "Repo", "worker"]
-    pub symbols: Field,
-    pub symbol_locations: Field,
-
-    // fast fields for scoring
-    pub lang: Field,
-    pub avg_line_length: Field,
-    pub last_commit_unix_seconds: Field,
-
-    // fast byte versions of certain fields for collector-level filtering
-    pub raw_content: Field,
-    pub raw_repo_name: Field,
-    pub raw_relative_path: Field,
-}
-
-impl File {
-    pub fn new(config: Arc<Configuration>, semantic: Option<Semantic>) -> Self {
-        let mut builder = tantivy::schema::SchemaBuilder::new();
-        let trigram = TextOptions::default().set_stored().set_indexing_options(
-            TextFieldIndexing::default()
-                .set_tokenizer("default")
-                .set_index_option(IndexRecordOption::WithFreqsAndPositions),
-        );
-
-        let entry_disk_path = builder.add_text_field("entry_disk_path", STRING);
-        let repo_disk_path = builder.add_text_field("repo_disk_path", STRING);
-        let repo_ref = builder.add_text_field("repo_ref", STRING | STORED);
-        let repo_name = builder.add_text_field("repo_name", trigram.clone());
-        let relative_path = builder.add_text_field("relative_path", trigram.clone());
-
-        let content = builder.add_text_field("content", trigram.clone());
-        let line_end_indices =
-            builder.add_bytes_field("line_end_indices", BytesOptions::default().set_stored());
-
-        let symbols = builder.add_text_field("symbols", trigram);
-        let symbol_locations =
-            builder.add_bytes_field("symbol_locations", BytesOptions::default().set_stored());
-
-        let lang = builder.add_bytes_field(
-            "lang",
-            BytesOptions::default().set_stored().set_indexed() | FAST,
-        );
-        let avg_line_length = builder.add_f64_field("line_length", FAST);
-        let last_commit_unix_seconds = builder.add_u64_field("last_commit_unix_seconds", FAST);
-
-        let raw_content = builder.add_bytes_field("raw_content", FAST);
-        let raw_repo_name = builder.add_bytes_field("raw_repo_name", FAST);
-        let raw_relative_path = builder.add_bytes_field("raw_relative_path", FAST);
-
-        Self {
-            entry_disk_path,
-            repo_disk_path,
-            relative_path,
-            repo_ref,
-            repo_name,
-            content,
-            line_end_indices,
-            symbols,
-            symbol_locations,
-            lang,
-            avg_line_length,
-            last_commit_unix_seconds,
-            schema: builder.build(),
-            semantic,
-            config,
-            raw_content,
-            raw_repo_name,
-            raw_relative_path,
-
-            #[cfg(feature = "debug")]
-            histogram: Arc::new(Histogram::builder().build().unwrap().into()),
-        }
-    }
-}
-
-fn should_index<P: AsRef<Path>>(p: &P) -> bool {
-    let path = p.as_ref();
-
-    #[rustfmt::skip]
-    const EXT_BLACKLIST: &[&str] = &[
-        // graphics
-        "png", "jpg", "jpeg", "ico", "bmp", "bpg", "eps", "pcx", "ppm", "tga", "tiff", "wmf", "xpm",
-        "svg",
-        // fonts
-        "ttf", "woff2", "fnt", "fon", "otf",
-        // documents
-        "pdf", "ps", "doc", "dot", "docx", "dotx", "xls", "xlsx", "xlt", "odt", "ott", "ods", "ots", "dvi", "pcl",
-        // media
-        "mp3", "ogg", "ac3", "aac", "mod", "mp4", "mkv", "avi", "m4v", "mov", "flv",
-        // compiled
-        "jar", "pyc", "war", "ear",
-        // compression
-        "tar", "gz", "bz2", "xz", "7z", "bin", "apk", "deb", "rpm",
-        // executable
-        "com", "exe", "out", "coff", "obj", "dll", "app", "class",
-        // misc.
-        "log", "wad", "bsp", "bak", "sav", "dat", "lock",
-    ];
-
-    let Some(ext) = path.extension() else {
-        return true;
-    };
-
-    let ext = ext.to_string_lossy();
-    if EXT_BLACKLIST.contains(&&*ext) {
-        return false;
-    }
-
-    static VENDOR_PATTERNS: Lazy<HashMap<&'static str, SmallVec<[Regex; 1]>>> = Lazy::new(|| {
-        let patterns: &[(&[&str], &[&str])] = &[
-            (
-                &["go", "proto"],
-                &["^(vendor|third_party)/.*\\.\\w+$", "\\w+\\.pb\\.go$"],
-            ),
-            (
-                &["js", "jsx", "ts", "tsx", "css", "md", "json", "txt", "conf"],
-                &["^(node_modules|vendor|dist)/.*\\.\\w+$"],
-            ),
-        ];
-
-        patterns
-            .iter()
-            .flat_map(|(exts, rxs)| exts.iter().map(move |&e| (e, rxs)))
-            .map(|(ext, rxs)| {
-                let regexes = rxs
-                    .iter()
-                    .filter_map(|source| match Regex::new(source) {
-                        Ok(r) => Some(r),
-                        Err(e) => {
-                            warn!(%e, "failed to compile vendor regex {source:?}");
-                            None
-                        }
-                    })
-                    .collect();
-
-                (ext, regexes)
-            })
-            .collect()
-    });
-
-    match VENDOR_PATTERNS.get(&*ext) {
-        None => true,
-        Some(rxs) => !rxs.iter().any(|r| r.is_match(&path.to_string_lossy())),
-    }
-}
-
-// Empirically calculated using:
-//     cat **/*.rs | awk '{SUM+=length;N+=1}END{print SUM/N}'
-const AVG_LINE_LEN: u64 = 30;
-const MAX_LINE_COUNT: u64 = 20000;
-const MAX_FILE_LEN: u64 = AVG_LINE_LEN * MAX_LINE_COUNT;
 
 #[async_trait]
 impl Indexable for File {
-    fn index_repository(
+    async fn index_repository(
         &self,
         reporef: &RepoRef,
         repo: &Repository,
         repo_metadata: &RepoMetadata,
         writer: &IndexWriter,
-        progress: &(dyn Fn(u8) + Sync),
+        pipes: &SyncPipes,
     ) -> Result<()> {
-        let file_cache = repo.open_file_cache(&self.config.index_dir)?;
+        let file_cache = Arc::new(FileCache::for_repo(&self.sql, reporef));
+        let cache_snapshot = file_cache.retrieve().await;
         let repo_name = reporef.indexed_name();
-
-        // note: this WILL observe .gitignore files for the respective repos.
-        let walker = ignore::Walk::new(&repo.disk_path)
-            .filter_map(|de| match de {
-                Ok(de) => Some(de),
-                Err(err) => {
-                    warn!(%err, "access failure; skipping");
-                    None
-                }
-            })
-            // Preliminarily ignore files that are very large, without reading the contents.
-            .filter(|de| matches!(de.metadata(), Ok(meta) if meta.len() < MAX_FILE_LEN))
-            .filter_map(|de| crate::canonicalize(de.into_path()).ok())
-            .filter(|p| {
-                p.strip_prefix(&repo.disk_path)
-                    .as_ref()
-                    .map(should_index)
-                    .unwrap_or_default()
-            })
-            .collect::<Vec<PathBuf>>();
-
-        let count = walker.len();
         let processed = &AtomicU64::new(0);
 
-        let start = std::time::Instant::now();
-        use rayon::prelude::*;
+        let file_worker = |count: usize| {
+            let cache_snapshot = cache_snapshot.clone();
+            let file_cache = file_cache.clone();
+            move |dir_entry: RepoDirEntry| {
+                let completed = processed.fetch_add(1, Ordering::Relaxed);
+                pipes.index_percent(((completed as f32 / count as f32) * 100f32) as u8);
 
-        walker.into_par_iter().for_each(|entry_disk_path| {
-            let completed = processed.fetch_add(1, Ordering::Relaxed);
-            progress(((completed as f32 / count as f32) * 100f32) as u8);
+                let entry_disk_path = dir_entry.path().unwrap_or_default().to_owned();
+                let workload = Workload {
+                    repo_disk_path: &repo.disk_path,
+                    repo_ref: reporef.to_string(),
+                    repo_name: &repo_name,
+                    file_cache: &file_cache,
+                    cache_snapshot: &cache_snapshot,
+                    repo_metadata,
+                    dir_entry,
+                };
 
-            let workload = Workload {
-                entry_disk_path: entry_disk_path.clone(),
-                repo_disk_path: &repo.disk_path,
-                repo_ref: reporef.to_string(),
-                repo_name: &repo_name,
-                cache: &file_cache,
-                repo_metadata,
-            };
-
-            debug!(?entry_disk_path, "queueing entry");
-            if let Err(err) = self.worker(workload, writer) {
-                warn!(%err, ?entry_disk_path, "indexing failed; skipping");
+                trace!(entry_disk_path, "queueing entry");
+                if let Err(err) = self.worker(workload, writer) {
+                    warn!(%err, entry_disk_path, "indexing failed; skipping");
+                }
             }
-        });
+        };
+
+        let start = std::time::Instant::now();
+
+        // If we could determine the time of the last commit, proceed
+        // with a Git Walker, otherwise use a FS walker
+        if repo_metadata.last_commit_unix_secs.is_some() {
+            let walker = GitWalker::open_repository(
+                reporef,
+                &repo.disk_path,
+                repo.branch_filter.as_ref().map(Into::into),
+            )?;
+            let count = walker.len();
+            walker.for_each(pipes, file_worker(count));
+        } else {
+            let walker = FileWalker::index_directory(&repo.disk_path);
+            let count = walker.len();
+            walker.for_each(pipes, file_worker(count));
+        };
+
+        if pipes.is_cancelled() {
+            bail!("cancelled");
+        }
 
         info!(?repo.disk_path, "repo file indexing finished, took {:?}", start.elapsed());
 
         // files that are no longer tracked by the git index are to be removed
         // from the tantivy & qdrant indices
         let mut qdrant_remove_list = vec![];
-        file_cache.retain(|k, v| {
-            if v.fresh.not() {
-                // delete from tantivy
-                writer.delete_term(Term::from_field_text(
-                    self.entry_disk_path,
-                    &k.to_string_lossy(),
-                ));
-
-                // delete from qdrant
-                if let Ok(relative_path) = k.strip_prefix(&repo.disk_path) {
-                    qdrant_remove_list.push(relative_path.to_string_lossy().to_string());
-                }
+        cache_snapshot.retain(|k, v| {
+            if !v.fresh {
+                writer.delete_term(Term::from_field_text(self.unique_hash, k));
+                qdrant_remove_list.push(k.to_string());
             }
 
             v.fresh
@@ -323,17 +133,14 @@ impl Indexable for File {
                 let reporef = reporef.to_string();
                 tokio::spawn(async move {
                     semantic
-                        .delete_points_by_path(
-                            reporef.as_str(),
-                            qdrant_remove_list.iter().map(|t| t.as_str()),
-                        )
+                        .delete_points_for_hash(reporef.as_str(), qdrant_remove_list.into_iter())
                         .await;
                 });
             }
         }
 
-        progress(100);
-        repo.save_file_cache(&self.config.index_dir, file_cache)?;
+        pipes.index_percent(100);
+        file_cache.persist(cache_snapshot).await?;
         Ok(())
     }
 
@@ -350,65 +157,159 @@ impl Indexable for File {
 }
 
 impl Indexer<File> {
-    pub async fn file_body(&self, file_disk_path: &str) -> Result<String> {
-        // Mostly taken from `by_path`, below.
-        //
-        // TODO: This can be unified with `by_path` below, but we first need to decide on a unified
-        // path referencing API throughout the webserver.
-
+    /// Search this index for paths fuzzily matching a given string.
+    ///
+    /// For example, the string `Cargo` can return documents whose path is `foo/Cargo.toml`,
+    /// or `bar/Cargo.lock`. Constructs regexes that permit an edit-distance of 2.
+    ///
+    /// If the regex filter fails to build, an empty list is returned.
+    pub async fn fuzzy_path_match(
+        &self,
+        repo_ref: &RepoRef,
+        query_str: &str,
+        branch: Option<&str>,
+        limit: usize,
+    ) -> impl Iterator<Item = FileDocument> + '_ {
+        // lifted from query::compiler
         let reader = self.reader.read().await;
         let searcher = reader.searcher();
+        let collector = TopDocs::with_limit(100);
+        let file_source = &self.source;
 
-        let query = TermQuery::new(
-            Term::from_field_text(self.source.entry_disk_path, file_disk_path),
-            IndexRecordOption::Basic,
-        );
+        // hits is a mapping between a document address and the number of trigrams in it that
+        // matched the query
+        let repo_ref_term = Term::from_field_text(self.source.repo_ref, &repo_ref.to_string());
+        let branch_term = branch
+            .map(|b| {
+                trigrams(b)
+                    .map(|token| Term::from_field_text(self.source.branches, token.as_str()))
+                    .map(|term| TermQuery::new(term, IndexRecordOption::Basic))
+                    .map(Box::new)
+                    .map(|q| q as Box<dyn Query>)
+                    .collect::<Vec<_>>()
+            })
+            .map(BooleanQuery::intersection);
+        let mut hits = trigrams(query_str)
+            .flat_map(|s| case_permutations(s.as_str()))
+            .map(|token| Term::from_field_text(self.source.relative_path, token.as_str()))
+            .map(|term| {
+                let mut query: Vec<Box<dyn Query>> = vec![
+                    Box::new(TermQuery::new(term, IndexRecordOption::Basic)),
+                    Box::new(TermQuery::new(
+                        repo_ref_term.clone(),
+                        IndexRecordOption::Basic,
+                    )),
+                ];
 
-        let collector = TopDocs::with_limit(1);
-        let search_results = searcher
-            .search(&query, &collector)
-            .context("failed to search index")?;
+                if let Some(b) = branch_term.as_ref() {
+                    query.push(Box::new(b.clone()));
+                };
 
-        match search_results.as_slice() {
-            [] => Err(anyhow::Error::msg("no path found")),
-            [(_, doc_addr)] => Ok(searcher
-                .doc(*doc_addr)
-                .context("failed to get document by address")?
-                .get_first(self.source.content)
-                .context("content field was missing")?
-                .as_text()
-                .context("content field did not contain text")?
-                .to_owned()),
-            _ => {
-                warn!("TopDocs is not limited to 1 and index contains duplicates");
-                Err(anyhow::Error::msg("multiple paths returned"))
-            }
-        }
+                BooleanQuery::intersection(query)
+            })
+            .flat_map(|query| {
+                searcher
+                    .search(&query, &collector)
+                    .expect("failed to search index")
+                    .into_iter()
+                    .map(move |(_, addr)| addr)
+            })
+            .fold(HashMap::new(), |mut map: HashMap<_, usize>, hit| {
+                *map.entry(hit).or_insert(0) += 1;
+                map
+            })
+            .into_iter()
+            .map(move |(addr, count)| {
+                let retrieved_doc = searcher
+                    .doc(addr)
+                    .expect("failed to get document by address");
+                let doc = FileReader.read_document(file_source, retrieved_doc);
+                (doc, count)
+            })
+            .collect::<Vec<_>>();
+
+        // order hits in
+        // - decsending order of number of matched trigrams
+        // - alphabetical order of relative paths to break ties
+        //
+        //
+        // for a list of hits like so:
+        //
+        //     apple.rs 2
+        //     ball.rs  3
+        //     cat.rs   2
+        //
+        // the ordering produced is:
+        //
+        //     ball.rs  3  -- highest number of hits
+        //     apple.rs 2  -- same numeber of hits, but alphabetically preceeds cat.rs
+        //     cat.rs   2
+        //
+        hits.sort_by(|(this_doc, this_count), (other_doc, other_count)| {
+            let order_count_desc = other_count.cmp(this_count);
+            let order_path_asc = this_doc
+                .relative_path
+                .as_str()
+                .cmp(other_doc.relative_path.as_str());
+
+            order_count_desc.then(order_path_asc)
+        });
+
+        let regex_filter = build_fuzzy_regex_filter(query_str);
+
+        // if the regex filter fails to build for some reason, the filter defaults to returning
+        // false and zero results are produced
+        hits.into_iter()
+            .map(|(doc, _)| doc)
+            .filter(move |doc| {
+                regex_filter
+                    .as_ref()
+                    .map(|f| f.is_match(&doc.relative_path))
+                    .unwrap_or_default()
+            })
+            .filter(|doc| !doc.relative_path.ends_with('/')) // omit directories
+            .take(limit)
     }
 
     pub async fn by_path(
         &self,
         repo_ref: &RepoRef,
         relative_path: &str,
-    ) -> Result<ContentDocument> {
+        branch: Option<&str>,
+    ) -> Result<Option<ContentDocument>> {
         let reader = self.reader.read().await;
         let searcher = reader.searcher();
 
         let file_index = searcher.index();
-        let file_source = &self.source;
 
         // query the `relative_path` field of the `File` index, using tantivy's query language
         //
         // XXX: can we use the bloop query language here instead?
         let query_parser = QueryParser::for_index(
             file_index,
-            vec![self.source.repo_disk_path, self.source.relative_path],
+            vec![self.source.repo_ref, self.source.relative_path],
         );
+
+        let mut query_string =
+            format!(r#"repo_ref:"{repo_ref}" AND relative_path:"{relative_path}""#);
+
+        if let Some(b) = branch {
+            query_string += &format!(r#" AND branches:"{b}""#);
+        }
+
         let query = query_parser
-            .parse_query(&format!(
-                "repo_ref:\"{repo_ref}\" AND relative_path:\"{relative_path}\""
-            ))
+            .parse_query(&query_string)
             .expect("failed to parse tantivy query");
+
+        self.top_hit(query, searcher).await
+    }
+
+    async fn top_hit(
+        &self,
+        query: Box<dyn Query>,
+        searcher: tantivy::Searcher,
+    ) -> Result<Option<ContentDocument>> {
+        let file_source = &self.source;
 
         let collector = TopDocs::with_limit(1);
         let search_results = searcher
@@ -417,14 +318,16 @@ impl Indexer<File> {
 
         match search_results.as_slice() {
             // no paths matched, the input path was not well formed
-            [] => Err(anyhow::Error::msg("no path found")),
+            [] => Ok(None),
 
             // exactly one path, good
             [(_, doc_addr)] => {
                 let retrieved_doc = searcher
                     .doc(*doc_addr)
                     .expect("failed to get document by address");
-                Ok(ContentReader.read_document(file_source, retrieved_doc))
+                Ok(Some(
+                    ContentReader.read_document(file_source, retrieved_doc),
+                ))
             }
 
             // more than one path matched, this can occur when top docs is no
@@ -441,34 +344,58 @@ impl Indexer<File> {
     // TODO: Look at this again when:
     //  - directory retrieval is ready
     //  - unified referencing is ready
-    pub async fn by_repo(&self, repo_ref: &RepoRef, lang: Option<&str>) -> Vec<ContentDocument> {
+    pub async fn by_repo<S: AsRef<str>>(
+        &self,
+        repo_ref: &RepoRef,
+        langs: impl Iterator<Item = S>,
+        branch: Option<&str>,
+    ) -> Vec<ContentDocument> {
         let reader = self.reader.read().await;
         let searcher = reader.searcher();
 
+        let mut query = vec![];
+
         // repo query
-        let path_query = Box::new(TermQuery::new(
+        query.push(Box::new(TermQuery::new(
             Term::from_field_text(self.source.repo_ref, &repo_ref.to_string()),
             IndexRecordOption::Basic,
-        ));
+        )) as Box<dyn Query>);
 
-        // if file has a recognised language, constrain by files of the same lang
-        let query = match lang {
-            Some(l) => BooleanQuery::intersection(vec![
-                path_query,
-                // language query
-                Box::new(TermQuery::new(
-                    Term::from_field_bytes(self.source.lang, l.to_ascii_lowercase().as_bytes()),
-                    IndexRecordOption::Basic,
-                )),
-            ]),
-            None => BooleanQuery::intersection(vec![path_query]),
+        let branch_term = branch
+            .map(|b| {
+                trigrams(b)
+                    .map(|token| Term::from_field_text(self.source.branches, token.as_str()))
+                    .map(|term| TermQuery::new(term, IndexRecordOption::Basic))
+                    .map(Box::new)
+                    .map(|q| q as Box<dyn Query>)
+                    .collect::<Vec<_>>()
+            })
+            .map(BooleanQuery::intersection);
+        if let Some(b) = branch_term {
+            query.push(Box::new(b) as Box<dyn Query>);
         };
 
-        let collector = TopDocs::with_limit(100);
+        query.push({
+            let queries = langs
+                .map(|lang| {
+                    Box::new(TermQuery::new(
+                        Term::from_field_bytes(
+                            self.source.lang,
+                            lang.as_ref().to_ascii_lowercase().as_bytes(),
+                        ),
+                        IndexRecordOption::Basic,
+                    )) as Box<dyn Query>
+                })
+                .collect::<Vec<_>>();
+            Box::new(BooleanQuery::union(queries))
+        });
+
+        let query = BooleanQuery::intersection(query);
+        let collector = TopDocs::with_limit(500);
         searcher
             .search(&query, &collector)
             .expect("failed to search index")
-            .into_iter()
+            .into_par_iter()
             .map(|(_, doc_addr)| {
                 let retrieved_doc = searcher
                     .doc(doc_addr)
@@ -480,171 +407,94 @@ impl Indexer<File> {
 }
 
 impl File {
-    #[tracing::instrument(fields(repo=%workload.repo_ref, entry_disk_path=?workload.entry_disk_path), skip_all)]
+    #[tracing::instrument(fields(repo=%workload.repo_ref, entry_disk_path=?workload.dir_entry.path()), skip_all)]
     fn worker(&self, workload: Workload<'_>, writer: &IndexWriter) -> Result<()> {
         let Workload {
-            entry_disk_path,
             repo_ref,
             repo_disk_path,
             repo_name,
             repo_metadata,
-            cache,
+            file_cache,
+            cache_snapshot,
+            dir_entry,
         } = workload;
 
         #[cfg(feature = "debug")]
         let start = Instant::now();
-
-        let mut buffer = if entry_disk_path.is_file() {
-            match std::fs::read_to_string(&entry_disk_path) {
-                Err(err) => {
-                    warn!(%err, ?entry_disk_path, "read failed; skipping");
-                    return Ok(());
-                }
-                Ok(buffer) => buffer,
-            }
-        } else {
-            String::new()
-        };
-
-        let relative_path = entry_disk_path.strip_prefix(repo_disk_path)?;
-        let relative_path_str = if entry_disk_path.is_dir() {
-            format!("{}{MAIN_SEPARATOR}", relative_path.to_string_lossy()).into()
-        } else {
-            relative_path.to_string_lossy()
-        };
-
         trace!("processing file");
 
-        let content_hash = {
+        let relative_path = {
+            let entry_srcpath = PathBuf::from(dir_entry.path().ok_or(anyhow::anyhow!(
+                "dir entry is not a valid file or directory"
+            ))?);
+            entry_srcpath
+                .strip_prefix(repo_disk_path)
+                .map(ToOwned::to_owned)
+                .unwrap_or(entry_srcpath)
+        };
+        let entry_pathbuf = repo_disk_path.join(&relative_path);
+
+        let semantic_hash = {
             let mut hash = blake3::Hasher::new();
             hash.update(crate::state::SCHEMA_VERSION.as_bytes());
-            hash.update(buffer.as_bytes());
+            hash.update(relative_path.to_string_lossy().as_ref().as_ref());
+            hash.update(repo_ref.as_bytes());
+            hash.update(dir_entry.buffer().unwrap_or_default().as_bytes());
             hash.finalize().to_hex().to_string()
         };
 
-        trace!("adding cache entry");
+        let tantivy_hash = {
+            let branch_list = dir_entry.branches().unwrap_or_default();
+            let mut hash = blake3::Hasher::new();
+            hash.update(semantic_hash.as_ref());
+            hash.update(branch_list.join("\n").as_bytes());
+            hash.finalize().to_hex().to_string()
+        };
 
-        match cache.entry(entry_disk_path.clone()) {
-            Entry::Occupied(mut val) if val.get().value == content_hash => {
-                // skip processing if contents are up-to-date in the cache
-                val.get_mut().fresh = true;
+        let last_commit = repo_metadata.last_commit_unix_secs.unwrap_or(0);
+
+        match dir_entry {
+            _ if is_cache_fresh(cache_snapshot, &tantivy_hash, &entry_pathbuf) => {
+                info!("fresh; skipping");
                 return Ok(());
             }
-            Entry::Occupied(mut val) => {
-                val.insert(content_hash.into());
+            RepoDirEntry::Dir(dir) => {
+                trace!("writing dir document");
+                let doc = dir.build_document(
+                    self,
+                    repo_name,
+                    relative_path.as_path(),
+                    repo_disk_path,
+                    repo_ref.as_str(),
+                    last_commit,
+                    tantivy_hash,
+                );
+                writer.add_document(doc)?;
+                trace!("dir document written");
             }
-            Entry::Vacant(val) => {
-                val.insert(content_hash.into());
-            }
-        }
-        trace!("added cache entry");
-
-        let lang_str = if entry_disk_path.is_file() {
-            repo_metadata
-                .langs
-                .path_map
-                .get(&entry_disk_path)
-                .unwrap_or_else(|| {
-                    warn!("Path not found in language map");
-                    &Some("")
-                })
-                .unwrap_or("")
-        } else {
-            ""
-        };
-
-        // calculate symbol locations
-        let symbol_locations = if entry_disk_path.is_file() {
-            // build a syntax aware representation of the file
-            let scope_graph = TreeSitterFile::try_build(buffer.as_bytes(), lang_str)
-                .and_then(TreeSitterFile::scope_graph);
-
-            match scope_graph {
-                // we have a graph, use that
-                Ok(graph) => SymbolLocations::TreeSitter(graph),
-                // no graph, try ctags instead
-                Err(err) => {
-                    warn!(?err, %lang_str, "failed to build scope graph");
-                    match repo_metadata.symbols.get(relative_path) {
-                        Some(syms) => SymbolLocations::Ctags(syms.clone()),
-                        // no ctags either
-                        _ => {
-                            warn!(%lang_str, ?entry_disk_path, "failed to build tags");
-                            SymbolLocations::Empty
-                        }
-                    }
-                }
-            }
-        } else {
-            SymbolLocations::Empty
-        };
-
-        // flatten the list of symbols into a string with just text
-        let symbols = symbol_locations
-            .list()
-            .iter()
-            .map(|sym| buffer[sym.range.start.byte..sym.range.end.byte].to_owned())
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        // add an NL if this file is not NL-terminated
-        if !buffer.ends_with('\n') {
-            buffer += "\n";
-        }
-
-        let line_end_indices = buffer
-            .match_indices('\n')
-            .flat_map(|(i, _)| u32::to_le_bytes(i as u32))
-            .collect::<Vec<_>>();
-
-        // Skip files that are too long. This is not necessarily caught in the filesize check, e.g.
-        // for a file like `vocab.txt` which has thousands of very short lines.
-        if line_end_indices.len() > MAX_LINE_COUNT as usize {
-            return Ok(());
-        }
-
-        let lines_avg = buffer.len() as f64 / buffer.lines().count() as f64;
-        let last_commit = repo_metadata.last_commit_unix_secs;
-
-        // produce vectors for this document if it is a file
-        if entry_disk_path.is_file() {
-            if let Some(semantic) = &self.semantic {
-                tokio::task::block_in_place(|| {
-                    Handle::current().block_on(semantic.insert_points_for_buffer(
+            RepoDirEntry::File(file) => {
+                trace!("writing file document");
+                let doc = file
+                    .build_document(
+                        self,
                         repo_name,
-                        &repo_ref,
-                        &relative_path.to_string_lossy(),
-                        &buffer,
-                        lang_str,
-                    ))
-                });
+                        relative_path.as_path(),
+                        repo_disk_path,
+                        semantic_hash,
+                        tantivy_hash,
+                        entry_pathbuf.as_path(),
+                        repo_ref.as_str(),
+                        last_commit,
+                        repo_metadata,
+                        file_cache,
+                    )
+                    .ok_or(anyhow::anyhow!("failed to build document"))?;
+                writer.add_document(doc)?;
+
+                trace!("file document written");
             }
+            RepoDirEntry::Other => anyhow::bail!("dir entry was neither a file nor a directory"),
         }
-
-        trace!("writing document");
-        #[cfg(feature = "debug")]
-        let buf_size = buffer.len();
-        writer.add_document(doc!(
-            self.repo_disk_path => repo_disk_path.to_string_lossy().as_ref(),
-            self.entry_disk_path => entry_disk_path.to_string_lossy().as_ref(),
-            self.relative_path => relative_path_str.as_ref(),
-            self.repo_ref => repo_ref,
-            self.repo_name => repo_name,
-            self.content => buffer.as_str(),
-            self.line_end_indices => line_end_indices,
-            self.lang => lang_str.to_ascii_lowercase().as_bytes(),
-            self.avg_line_length => lines_avg,
-            self.last_commit_unix_seconds => last_commit,
-            self.symbol_locations => bincode::serialize(&symbol_locations)?,
-            self.symbols => symbols,
-            self.raw_content => buffer.as_bytes(),
-            self.raw_repo_name => repo_name.as_bytes(),
-            self.raw_relative_path => relative_path_str.as_ref().as_bytes(),
-        ))?;
-
-        trace!("document written");
 
         #[cfg(feature = "debug")]
         {
@@ -665,12 +515,7 @@ impl File {
                     .low()
             {
                 // default console formatter is different when we're debugging. need to print more info here.
-                warn!(
-                    ?relative_path,
-                    ?elapsed,
-                    buf_size,
-                    "file took too long to process"
-                )
+                warn!(?relative_path, ?elapsed, "file took too long to process")
             }
         }
 
@@ -678,41 +523,257 @@ impl File {
     }
 }
 
+impl RepoDir {
+    #[allow(clippy::too_many_arguments)]
+    fn build_document(
+        self,
+        schema: &File,
+        repo_name: &str,
+        relative_path: &Path,
+        repo_disk_path: &Path,
+        repo_ref: &str,
+        last_commit: u64,
+        tantivy_cache_key: String,
+    ) -> tantivy::schema::Document {
+        let relative_path_str = format!("{}/", relative_path.to_string_lossy());
+        #[cfg(windows)]
+        let relative_path_str = relative_path_str.replace('\\', "/");
+
+        let branches = self.branches.join("\n");
+
+        doc!(
+                schema.raw_repo_name => repo_name.as_bytes(),
+                schema.raw_relative_path => relative_path_str.as_bytes(),
+                schema.repo_disk_path => repo_disk_path.to_string_lossy().as_ref(),
+                schema.relative_path => relative_path_str,
+                schema.repo_ref => repo_ref,
+                schema.repo_name => repo_name,
+                schema.last_commit_unix_seconds => last_commit,
+                schema.branches => branches,
+                schema.is_directory => true,
+                schema.unique_hash => tantivy_cache_key,
+
+                // nulls
+                schema.raw_content => Vec::<u8>::default(),
+                schema.content => String::default(),
+                schema.line_end_indices => Vec::<u8>::default(),
+                schema.lang => Vec::<u8>::default(),
+                schema.avg_line_length => f64::default(),
+                schema.symbol_locations => bincode::serialize(&SymbolLocations::default()).unwrap(),
+                schema.symbols => String::default(),
+        )
+    }
+}
+
+impl RepoFile {
+    #[allow(clippy::too_many_arguments)]
+    fn build_document(
+        mut self,
+        schema: &File,
+        repo_name: &str,
+        relative_path: &Path,
+        repo_disk_path: &Path,
+        semantic_cache_key: String,
+        tantivy_cache_key: String,
+        entry_pathbuf: &Path,
+        repo_ref: &str,
+        last_commit: u64,
+        repo_metadata: &RepoMetadata,
+        file_cache: &FileCache,
+    ) -> Option<tantivy::schema::Document> {
+        let relative_path_str = relative_path.to_string_lossy().to_string();
+        #[cfg(windows)]
+        let relative_path_str = relative_path_str.replace('\\', "/");
+
+        let branches = self.branches.join("\n");
+        let lang_str = repo_metadata
+            .langs
+            .get(entry_pathbuf, self.buffer.as_ref())
+            .unwrap_or_else(|| {
+                warn!(?entry_pathbuf, "Path not found in language map");
+                ""
+            });
+
+        let symbol_locations = {
+            // build a syntax aware representation of the file
+            let scope_graph = TreeSitterFile::try_build(self.buffer.as_bytes(), lang_str)
+                .and_then(TreeSitterFile::scope_graph);
+
+            match scope_graph {
+                // we have a graph, use that
+                Ok(graph) => SymbolLocations::TreeSitter(graph),
+                // no graph, it's empty
+                Err(_) => SymbolLocations::Empty,
+            }
+        };
+
+        // flatten the list of symbols into a string with just text
+        let symbols = symbol_locations
+            .list()
+            .iter()
+            .map(|sym| self.buffer[sym.range.start.byte..sym.range.end.byte].to_owned())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // add an NL if this file is not NL-terminated
+        if !self.buffer.ends_with('\n') {
+            self.buffer += "\n";
+        }
+
+        let line_end_indices = self
+            .buffer
+            .match_indices('\n')
+            .flat_map(|(i, _)| u32::to_le_bytes(i as u32))
+            .collect::<Vec<_>>();
+
+        // Skip files that are too long. This is not necessarily caught in the filesize check, e.g.
+        // for a file like `vocab.txt` which has thousands of very short lines.
+        if line_end_indices.len() > MAX_LINE_COUNT as usize {
+            return None;
+        }
+
+        let lines_avg = self.buffer.len() as f64 / self.buffer.lines().count() as f64;
+
+        if let Some(semantic) = &schema.semantic {
+            tokio::task::block_in_place(|| {
+                Handle::current().block_on(async {
+                    semantic
+                        .insert_points_for_buffer(
+                            repo_name,
+                            repo_ref,
+                            &relative_path_str,
+                            &self.buffer,
+                            lang_str,
+                            &self.branches,
+                            file_cache.chunks_for_file(&semantic_cache_key).await,
+                        )
+                        .await
+                })
+            });
+        }
+
+        Some(doc!(
+            schema.raw_content => self.buffer.as_bytes(),
+            schema.raw_repo_name => repo_name.as_bytes(),
+            schema.raw_relative_path => relative_path_str.as_bytes(),
+            schema.unique_hash => tantivy_cache_key,
+            schema.repo_disk_path => repo_disk_path.to_string_lossy().as_ref(),
+            schema.relative_path => relative_path_str,
+            schema.repo_ref => repo_ref,
+            schema.repo_name => repo_name,
+            schema.content => self.buffer,
+            schema.line_end_indices => line_end_indices,
+            schema.lang => lang_str.to_ascii_lowercase().as_bytes(),
+            schema.avg_line_length => lines_avg,
+            schema.last_commit_unix_seconds => last_commit,
+            schema.symbol_locations => bincode::serialize(&symbol_locations).unwrap(),
+            schema.symbols => symbols,
+            schema.branches => branches,
+            schema.is_directory => false,
+        ))
+    }
+}
+
+#[tracing::instrument(skip(cache))]
+fn is_cache_fresh(cache: &FileCacheSnapshot, unique_hash: &str, entry_pathbuf: &PathBuf) -> bool {
+    match cache.entry(unique_hash.into()) {
+        Entry::Occupied(mut val) => {
+            // skip processing if contents are up-to-date in the cache
+            val.get_mut().fresh = true;
+
+            trace!("cache hit");
+            return true;
+        }
+        Entry::Vacant(val) => {
+            _ = val.insert_entry(().into());
+        }
+    }
+
+    trace!("cache miss");
+    false
+}
+
+fn build_fuzzy_regex_filter(query_str: &str) -> Option<regex::RegexSet> {
+    fn additions(s: &str, i: usize, j: usize) -> String {
+        if i > j {
+            additions(s, j, i)
+        } else {
+            let mut s = s.to_owned();
+            s.insert_str(j, ".?");
+            s.insert_str(i, ".?");
+            s
+        }
+    }
+
+    fn replacements(s: &str, i: usize, j: usize) -> String {
+        if i > j {
+            replacements(s, j, i)
+        } else {
+            let mut s = s.to_owned();
+            s.remove(j);
+            s.insert_str(j, ".?");
+
+            s.remove(i);
+            s.insert_str(i, ".?");
+
+            s
+        }
+    }
+
+    fn one_of_each(s: &str, i: usize, j: usize) -> String {
+        if i > j {
+            one_of_each(s, j, i)
+        } else {
+            let mut s = s.to_owned();
+            s.remove(j);
+            s.insert_str(j, ".?");
+
+            s.insert_str(i, ".?");
+            s
+        }
+    }
+
+    let all_regexes = (query_str.char_indices().map(|(idx, _)| idx))
+        .flat_map(|i| (query_str.char_indices().map(|(idx, _)| idx)).map(move |j| (i, j)))
+        .filter(|(i, j)| i <= j)
+        .flat_map(|(i, j)| {
+            let mut v = vec![];
+            if j != query_str.len() {
+                v.push(one_of_each(query_str, i, j));
+                v.push(replacements(query_str, i, j));
+            }
+            v.push(additions(query_str, i, j));
+            v
+        });
+
+    regex::RegexSetBuilder::new(all_regexes)
+        // Increased from the default to account for long paths. At the time of writing,
+        // the default was `10 * (1 << 20)`.
+        .size_limit(10 * (1 << 25))
+        .case_insensitive(true)
+        .build()
+        .ok()
+}
+
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
 
     #[test]
-    fn test_should_index() {
-        let tests = [
-            // Ignore these extensions completely.
-            ("image.png", false),
-            ("image.jpg", false),
-            ("image.jpeg", false),
-            ("font.ttf", false),
-            ("font.otf", false),
-            ("font.woff2", false),
-            ("icon.ico", false),
-            // Simple paths that should be indexed.
-            ("foo.js", true),
-            ("bar.ts", true),
-            ("quux/fred.ts", true),
-            // Typical vendored paths.
-            ("vendor/jquery.js", false),
-            ("dist/react.js", false),
-            ("vendor/github.com/Microsoft/go-winio/file.go", false),
-            (
-                "third_party/protobuf/google/protobuf/descriptor.proto",
-                false,
-            ),
-            ("src/defs.pb.go", false),
-            // These are not typically vendored in Rust.
-            ("dist/main.rs", true),
-            ("vendor/foo.rs", true),
-        ];
+    fn fuzzy_multibyte_should_compile() {
+        let multibyte_str = "查询解析器在哪";
+        let filter = build_fuzzy_regex_filter(multibyte_str);
+        assert!(filter.is_some());
 
-        for (path, index) in tests {
-            assert_eq!(should_index(&Path::new(path)), index);
-        }
+        // tests removal of second character
+        assert!(filter.as_ref().unwrap().is_match("查解析器在哪"));
+
+        // tests replacement of second character with `n`
+        assert!(filter.as_ref().unwrap().is_match("查n析器在哪"));
+
+        // tests addition of character `n`
+        assert!(filter.as_ref().unwrap().is_match("查询解析器在哪n"));
     }
 }

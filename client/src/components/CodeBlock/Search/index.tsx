@@ -1,15 +1,13 @@
 import React, { useCallback, useContext, useMemo, useState } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
 import FileIcon from '../../FileIcon';
 import Code from '../Code';
 import { ResultClick, Snippet } from '../../../types/results';
 import Button from '../../Button';
 import BreadcrumbsPath from '../../BreadcrumbsPath';
-import { DropdownWithIcon } from '../../Dropdown';
-import { MoreHorizontal } from '../../../icons';
-import { getFileManagerName, isWindowsPath, splitPath } from '../../../utils';
 import { DeviceContext } from '../../../context/deviceContext';
-import { MenuItemType } from '../../../types/general';
 import { FileTreeFileType } from '../../../types';
+import FileMenu from '../../FileMenu';
 
 type Props = {
   snippets: Snippet[];
@@ -43,8 +41,9 @@ const CodeBlockSearch = ({
   hideDropdown,
   hideMatchCounter,
 }: Props) => {
+  const { t } = useTranslation();
   const [isExpanded, setExpanded] = useState(false);
-  const { os, openFolderInExplorer } = useContext(DeviceContext);
+  const { os, openFolderInExplorer, openLink } = useContext(DeviceContext);
 
   const handleMouseUp = useCallback(
     (startLine?: number, endLine?: number) => {
@@ -73,8 +72,8 @@ const CodeBlockSearch = ({
   }, [snippets]);
 
   return (
-    <div className="w-full border border-gray-700 rounded-4">
-      <div className="w-full flex justify-between bg-gray-800 py-1 px-3 h-11.5 border-b border-gray-700 gap-2 select-none">
+    <div className="w-full border border-bg-border rounded-4">
+      <div className="w-full flex justify-between rounded-tl-4 rounded-tr-4 bg-bg-shade px-3 h-13 border-b border-bg-border gap-2">
         <div className="flex items-center gap-2 max-w-[calc(100%-120px)] w-full">
           <FileIcon filename={filePath} />
           <BreadcrumbsPath
@@ -85,51 +84,22 @@ const CodeBlockSearch = ({
             }
           />
         </div>
-        <div className="flex gap-2 items-center text-gray-500 flex-shrink-0">
-          {/*<div className="flex items-center gap-2">*/}
-          {/*  <Branch />*/}
-          {/*  <span className="body-s">{branch}</span>*/}
-          {/*</div>*/}
-          {/*<span className="text-gray-700 h-3 border-l border-l-gray-700"></span>*/}
+        <div className="flex gap-2 items-center flex-shrink-0">
           {!hideMatchCounter ? (
-            <span className="body-s text-gray-100">
-              {totalMatches} match{totalMatches > 1 ? 'es' : ''}
+            <span className="body-s text-label-title">
+              <Trans count={totalMatches}># match</Trans>
             </span>
           ) : (
             ''
           )}
           {!hideDropdown && !repoPath.startsWith('github') && (
-            <span>
-              <DropdownWithIcon
-                items={[
-                  {
-                    type: MenuItemType.DEFAULT,
-                    text: `View in ${getFileManagerName(os.type)}`,
-                    onClick: () => {
-                      openFolderInExplorer(
-                        repoPath +
-                          (isWindowsPath(repoPath) ? '\\' : '/') +
-                          (os.type === 'Darwin'
-                            ? filePath
-                            : splitPath(filePath)
-                                .slice(0, -1)
-                                .join(isWindowsPath(filePath) ? '\\' : '/')),
-                      );
-                    },
-                  },
-                ]}
-                icon={<MoreHorizontal />}
-                noChevron
-                btnSize="small"
-                btnOnlyIcon
-              />
-            </span>
+            <FileMenu repoPath={'local/' + repoPath} relativePath={filePath} />
           )}
         </div>
       </div>
 
       <div
-        className={`bg-gray-900 text-gray-600 text-xs  border-gray-700 ${
+        className={`bg-bg-sub text-label-muted text-xs border-bg-border ${
           collapsed ? 'py-2' : 'py-4'
         } ${onClick ? 'cursor-pointer' : ''} w-full overflow-auto`}
       >
@@ -157,9 +127,9 @@ const CodeBlockSearch = ({
                 />
                 {index !== snippets.length - 1 ? (
                   collapsed ? (
-                    <span className="w-full border-t border-gray-700 block my-2" />
+                    <span className="w-full border-t border-bg-border block my-2" />
                   ) : (
-                    <pre className={` bg-gray-900 my-0 px-2`}>
+                    <pre className={`bg-bg-sub my-0 px-2`}>
                       <table>
                         <tbody>
                           <tr className="token-line">
@@ -168,7 +138,7 @@ const CodeBlockSearch = ({
                                 snippet.symbols?.length ? 'w-5' : 'w-0 px-1'
                               }  text-center`}
                             />
-                            <td className="text-gray-500 min-w-6 text-right	text-l select-none">
+                            <td className="text-label-muted min-w-6 text-right text-l select-none">
                               ..
                             </td>
                           </tr>
@@ -187,7 +157,7 @@ const CodeBlockSearch = ({
           <div
             className={`${
               isExpanded ? 'mt-2' : 'mt-[-38px] pt-6'
-            } mb-1 relative flex justify-center align-center bg-gradient-to-b from-transparent via-gray-900/90 to-gray-900`}
+            } mb-1 relative flex justify-center align-center bg-gradient-to-b from-transparent via-bg-sub/90 to-bg-sub`}
           >
             <Button
               variant="secondary"
@@ -198,10 +168,8 @@ const CodeBlockSearch = ({
               }}
             >
               {isExpanded
-                ? 'Show less'
-                : `Show ${hiddenMatches} more match${
-                    hiddenMatches > 1 ? 'es' : ''
-                  }`}
+                ? t('Show less')
+                : t(`Show # more match`, { count: hiddenMatches })}
             </Button>
           </div>
         )}

@@ -1,10 +1,9 @@
 use std::cmp::{Ord, Ordering};
-use utoipa::ToSchema;
 
 use serde::{Deserialize, Serialize};
 
 /// A singular position in a text document
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Point {
     /// The byte index
     pub byte: usize,
@@ -32,9 +31,24 @@ impl Point {
     pub fn new(byte: usize, line: usize, column: usize) -> Self {
         Self { byte, line, column }
     }
+
+    pub fn from_byte(byte: usize, line_end_indices: &[u32]) -> Self {
+        let line = line_end_indices
+            .iter()
+            .position(|&line_end_byte| (line_end_byte as usize) > byte)
+            .unwrap_or(0);
+
+        let column = line
+            .checked_sub(1)
+            .and_then(|idx| line_end_indices.get(idx))
+            .map(|&prev_line_end| byte.saturating_sub(prev_line_end as usize))
+            .unwrap_or(byte);
+
+        Self::new(byte, line, column)
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TextRange {
     pub start: Point,
     pub end: Point,
@@ -61,7 +75,7 @@ impl TextRange {
         Self { start, end }
     }
 
-    pub fn contains(&self, other: TextRange) -> bool {
+    pub fn contains(&self, other: &TextRange) -> bool {
         // (self.start ... [other.start ... other.end] ... self.end)
         self.start <= other.start && other.end <= self.end
     }
@@ -74,6 +88,12 @@ impl TextRange {
 
     pub fn size(&self) -> usize {
         self.end.byte.saturating_sub(self.start.byte)
+    }
+
+    pub fn from_byte_range(range: std::ops::Range<usize>, line_end_indices: &[u32]) -> Self {
+        let start = Point::from_byte(range.start, line_end_indices);
+        let end = Point::from_byte(range.end, line_end_indices);
+        Self::new(start, end)
     }
 }
 

@@ -1,175 +1,149 @@
-import React, {
-  Dispatch,
-  Fragment,
-  SetStateAction,
-  useCallback,
-  useContext,
-  useEffect,
-  useState,
-} from 'react';
-import { GitHubLogo, Repository } from '../../icons';
-import Checkbox from '../Checkbox';
+import React, { Fragment, useCallback, useEffect, useState } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
+import { CheckIcon, HardDrive, RepositoryFilled } from '../../icons';
 import Button from '../Button';
 import SkeletonItem from '../SkeletonItem';
-import { RepoType } from '../../types/general';
-import { DeviceContext } from '../../context/deviceContext';
-import { getFileManagerName } from '../../utils';
-
-type RepoSelectType = RepoType & {
-  selected: boolean;
-  shortName: string;
-  folderName: string;
-};
+import { RepoUi } from '../../types/general';
+import { syncRepo } from '../../services/api';
 
 type Props = {
-  repos: RepoSelectType[];
-  setRepos: Dispatch<SetStateAction<RepoSelectType[]>>;
+  repos: RepoUi[];
   source: 'local' | 'GitHub';
-  activeTab: number;
-  removable?: boolean;
-  handleRemoveOne?: (repoRef: string) => void;
+  isLoading?: boolean;
   filter?: string;
+  onSync?: () => void;
+  sortBy?: 'name' | 'last_updated';
+  onFolderChange?: () => void;
 };
 
 const listItemClassName =
-  'bg-gray-900 border-b border-l border-r first:border-t first:rounded-t-md last:border-b last:rounded-b-md border-gray-800 pl-3 p-1.5 body-s group h-11';
+  'bg-bg-sub pl-3 p-1.5 body-s group h-11 border-b border-x border-bg-border first:border-t first:rounded-tl-md first:rounded-tr-md  last:rounded-bl-md last:rounded-br-md';
+
+const sortRepos = (repos: RepoUi[], sortBy?: 'name' | 'last_updated') =>
+  !sortBy || sortBy === 'name'
+    ? repos
+    : repos.sort((a, b) => (a.last_update > b.last_update ? -1 : 1));
 
 const RepoList = ({
   repos,
-  setRepos,
   source,
-  activeTab,
-  removable,
-  handleRemoveOne,
+  isLoading,
   filter,
+  onSync,
+  onFolderChange,
+  sortBy,
 }: Props) => {
-  const [filteredRepos, setFilteredRepos] = useState(repos);
-  const { openFolderInExplorer, openLink, os } = useContext(DeviceContext);
-
-  const handleSelectAll = useCallback((selected: boolean) => {
-    setRepos((prev) => prev.map((r) => ({ ...r, selected })));
-  }, []);
-
-  const handleSelectOne = useCallback((selected: boolean, repoRef: string) => {
-    setRepos((prev) => {
-      const newRepos = JSON.parse(JSON.stringify(prev));
-      const i = prev.findIndex((r) => r.ref === repoRef);
-      newRepos[i].selected = selected;
-      return newRepos;
-    });
-  }, []);
+  const { t } = useTranslation();
+  const [filteredRepos, setFilteredRepos] = useState(sortRepos(repos, sortBy));
 
   useEffect(() => {
     if (filter) {
-      setFilteredRepos(repos.filter((r) => r.name.includes(filter)));
+      setFilteredRepos(
+        sortRepos(
+          repos.filter((r) => r.name.includes(filter)),
+          sortBy,
+        ),
+      );
     } else {
-      setFilteredRepos(repos);
+      setFilteredRepos(sortRepos(repos, sortBy));
     }
-  }, [filter, repos]);
+  }, [filter, repos, sortBy]);
+
+  const handleSync = useCallback((repoRef: string) => {
+    syncRepo(repoRef);
+    onSync?.();
+  }, []);
 
   return (
-    <>
-      {activeTab === 1 && (
-        <div className="bg-gray-900 px-3 border border-b-4 border-transparent">
-          <Checkbox
-            checked={!!repos.length && repos.every((r) => r.selected)}
-            intermediary={
-              repos.some((r) => r.selected) && repos.some((r) => !r.selected)
-            }
-            label="Select all"
-            onChange={handleSelectAll}
-            disabled={!repos.length}
-          />
-        </div>
-      )}
-      <div className={`fade-bottom relative`}>
-        <ul className="bg-gray-900 shadow-light overflow-y-auto pb-6">
-          {repos.length ? (
-            !filteredRepos.length ? (
-              <div className="flex flex-col gap-2 py-6 text-center">
-                <p className="body-s text-gray-300">No results...</p>
-                <p className="text-gray-500 caption">
+    <div className={`relative`}>
+      <ul
+        className={`overflow-auto ${repos.length > 3 ? 'pb-6' : ''} rounded-md`}
+      >
+        {!isLoading ? (
+          !filteredRepos.length ? (
+            <div className="flex flex-col gap-2 py-6 text-center">
+              <p className="body-s text-label-title">
+                <Trans>No results...</Trans>
+              </p>
+              <p className="text-label-base caption">
+                <Trans>
                   Nothing matched your search. Try a different combination!
-                </p>
-              </div>
-            ) : (
-              filteredRepos.map((repo, i) => (
-                <Fragment key={repo.name + i}>
-                  {i === 0 ||
-                  (repos[i - 1] &&
-                    repos[i - 1].folderName !== repo.folderName) ? (
-                    <span
-                      className={`bg-gray-800 text-sm w-full py-1 px-4 block ${
-                        i === 0 ? 'rounded-t-md' : ''
-                      }`}
-                    >
-                      {repo.folderName}
-                    </span>
-                  ) : (
-                    ''
-                  )}
-                  <li className={listItemClassName} title={repo.name}>
-                    <div className="flex items-center justify-between w-full gap-2">
-                      {activeTab === 0 ? (
-                        <div className="py-1.5 flex items-center gap-2 overflow-hidden">
-                          {source === 'local' ? (
-                            <span className="w-4 h-5 flex-shrink-0">
-                              <Repository raw />
-                            </span>
-                          ) : (
-                            <GitHubLogo />
-                          )}
-                          <span className="whitespace-nowrap">
-                            {repo.shortName}
-                          </span>
+                </Trans>
+              </p>
+            </div>
+          ) : (
+            filteredRepos.map((repo, i) => (
+              <Fragment key={repo.name + i}>
+                {sortBy !== 'last_updated' &&
+                (i === 0 ||
+                  (filteredRepos[i - 1] &&
+                    filteredRepos[i - 1].folderName !== repo.folderName)) ? (
+                  <span
+                    className={`bg-bg-base border-x border-b first:border-t border-bg-border text-sm w-full py-2 px-4 flex items-center justify-between ${
+                      i === 0 ? 'rounded-t-md' : ''
+                    }`}
+                  >
+                    {repo.folderName}
+                    {onFolderChange && i === 0 && (
+                      <button
+                        className="caption text-bg-main"
+                        onClick={onFolderChange}
+                      >
+                        <Trans>Change folder</Trans>
+                      </button>
+                    )}
+                  </span>
+                ) : (
+                  ''
+                )}
+                <li className={listItemClassName} title={repo.name}>
+                  <div className="flex items-center justify-between w-full gap-2 h-full">
+                    <div className="flex items-center gap-2 overflow-hidden text-label-base group-hover:text-label-title">
+                      {repo.alreadySynced ? (
+                        <div className="text-bg-success w-5 h-5">
+                          <CheckIcon />
                         </div>
+                      ) : source === 'local' ? (
+                        <HardDrive />
                       ) : (
-                        <Checkbox
-                          checked={repo.selected}
-                          label={repo.shortName}
-                          onChange={(val) => handleSelectOne(val, repo.ref)}
-                        />
+                        <RepositoryFilled />
                       )}
+                      <span className="whitespace-nowrap">
+                        {repo.shortName}
+                      </span>
+                    </div>
+                    {repo.alreadySynced ? (
+                      <p className="caption">
+                        <Trans>Already synced</Trans>
+                      </p>
+                    ) : (
                       <Button
-                        variant="secondary"
+                        variant="primary"
                         size="small"
-                        className="opacity-0 group-hover:opacity-100"
+                        className="opacity-0 group-hover:opacity-100 focus:opacity-100"
                         onClick={() => {
-                          if (removable && handleRemoveOne) {
-                            handleRemoveOne(repo.ref);
-                          } else {
-                            source === 'local'
-                              ? openFolderInExplorer(repo.ref.slice(6))
-                              : openLink('https://' + repo.ref);
-                          }
+                          handleSync(repo.ref);
                         }}
                       >
-                        {removable
-                          ? 'Remove'
-                          : `View ${
-                              source === 'local'
-                                ? `in ${getFileManagerName(os.type)}`
-                                : 'on GitHub'
-                            }
-                        `}
+                        <Trans>Sync</Trans>
                       </Button>
-                    </div>
-                  </li>
-                </Fragment>
-              ))
-            )
-          ) : (
-            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((i) => (
-              <li key={i} className={`${listItemClassName} flex items-center`}>
-                <span className="h-4 w-full inline-block">
-                  <SkeletonItem />
-                </span>
-              </li>
+                    )}
+                  </div>
+                </li>
+              </Fragment>
             ))
-          )}
-        </ul>
-      </div>
-    </>
+          )
+        ) : (
+          [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((i) => (
+            <li key={i} className={`${listItemClassName} flex items-center`}>
+              <span className="h-4 w-full inline-block">
+                <SkeletonItem />
+              </span>
+            </li>
+          ))
+        )}
+      </ul>
+    </div>
   );
 };
 

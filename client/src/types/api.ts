@@ -1,4 +1,4 @@
-import { SymbolType, Range, FileResult } from './results';
+import { SymbolType, Range, TokenInfoType } from './results';
 
 export interface RangeLine {
   byte: number;
@@ -126,7 +126,6 @@ export interface DirectoryFileEntryData {
 export interface DirectoryEntry {
   name: string;
   entry_data: 'Directory' | DirectoryFileEntryData;
-  currentFile?: boolean;
 }
 
 export interface File {
@@ -136,10 +135,14 @@ export interface File {
   contents: string;
   repo_ref: string;
   siblings: DirectoryEntry[];
+  size: number;
+  loc: number;
+  sloc: number;
 }
 
 export interface FileResponse {
-  content: string;
+  contents: string;
+  lang: string;
 }
 
 export interface FiltersItem {
@@ -154,7 +157,7 @@ export interface FiltersResponse {
   languages: FiltersItem[];
 }
 
-export interface HoverablesRespone {
+export interface HoverablesResponse {
   ranges: {
     start: { byte: number; line: number; column: number };
     end: { byte: number; line: number; column: number };
@@ -182,11 +185,69 @@ export interface TokenInfoItem {
   data: TokenInfoDataItem[];
 }
 
+export type RefDefDataItem = {
+  kind: TokenInfoType;
+  range: {
+    start: {
+      byte: number;
+      line: number;
+      column: number;
+    };
+    end: {
+      byte: number;
+      line: number;
+      column: number;
+    };
+  };
+  snippet: {
+    data: string;
+    highlights: Range[];
+    tokenRange?: Range;
+    symbols: never[];
+    line_range: Range;
+  };
+};
+
 export interface TokenInfoResponse {
-  kind: 'reference' | 'definition';
-  references?: TokenInfoItem[];
-  definitions?: TokenInfoItem[];
+  data: {
+    file: string;
+    data: RefDefDataItem[];
+  }[];
 }
+
+export type AllConversationsResponse = {
+  created_at: number;
+  thread_id: string;
+  title: string;
+}[];
+
+type ProcStep = {
+  type: 'proc';
+  content: { query: string; paths: string[] };
+};
+
+type CodeStep = {
+  type: 'code';
+  content: { query: string };
+};
+
+type PathStep = {
+  type: 'path';
+  content: { query: string };
+};
+
+export type SearchStepType = ProcStep | CodeStep | PathStep;
+
+export type ConversationType = {
+  id: string;
+  search_steps: SearchStepType[];
+  query: { target: { Plain: string } };
+  conclusion: string;
+  answer: string;
+  paths: string[];
+  response_timestamp: string;
+  focused_chunk: { file_path: string } | null;
+};
 
 export interface SuggestionsResponse {
   count: number;

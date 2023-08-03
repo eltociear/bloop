@@ -2,7 +2,7 @@
  * https://github.com/FormidableLabs/prism-react-renderer/blob/master/src/utils/normalizeTokens.js
  * */
 
-import Prism from 'prismjs';
+import Prism, { TokenStream } from 'prismjs';
 import 'prismjs/components/prism-typescript.min';
 import 'prismjs/components/prism-jsx.min';
 import 'prismjs/components/prism-tsx.min';
@@ -34,8 +34,9 @@ import 'prismjs/components/prism-cpp.min';
 import 'prismjs/components/prism-scss.min';
 import 'prismjs/components/prism-less.min';
 import 'prismjs/components/prism-scala.min';
+import 'prismjs/components/prism-julia.min';
+import 'prismjs/components/prism-docker.min';
 import type { Token } from '../types/prism';
-import '../prism-vsc-dark-plus.css';
 
 const newlineRe = /\r\n|\r|\n/;
 
@@ -144,7 +145,7 @@ const normalizeTokens = (
     while (
       (i = tokenArrIndexStack[stackIndex]++) < tokenArrSizeStack[stackIndex]
     ) {
-      let content;
+      let content: string | TokenStream = '';
       let types = typeArrStack[stackIndex];
 
       const tokenArr = tokenArrStack[stackIndex];
@@ -156,7 +157,7 @@ const normalizeTokens = (
       if (typeof token === 'string') {
         types = stackIndex > 0 ? types : ['plain'];
         content = token;
-      } else {
+      } else if (!!token) {
         types = appendTypes(types, token.type);
         if (token.alias) {
           types = appendTypes(types, token.alias);
@@ -197,7 +198,7 @@ const normalizeTokens = (
       }
     }
 
-    // Decreate the stack depth
+    // Decrease the stack depth
     stackIndex--;
     typeArrStack.pop();
     tokenArrStack.pop();
@@ -223,7 +224,7 @@ export const getPrismLanguage = (lang: string) => {
 };
 
 function getLineEnding(content: string): LineEndings | undefined {
-  const matched = content.match(/\r\n|\r|\n/);
+  const matched = content?.match(/\r\n|\r|\n/);
   if (matched) {
     const returned = {
       '\r': 'CR',
@@ -235,11 +236,13 @@ function getLineEnding(content: string): LineEndings | undefined {
   }
 }
 
-export const tokenizeCode = (code: string, lang: string) => {
+export const tokenizeCode = (code: string, lang?: string) => {
   const lineEndings = getLineEnding(code);
   const tokens = Prism.tokenize(
     code,
-    Prism.languages[lang] || Prism.languages.plaintext,
+    lang && Prism.languages[lang]
+      ? Prism.languages[lang]
+      : Prism.languages.plaintext,
   );
   return normalizeTokens(tokens, lineEndings!);
 };

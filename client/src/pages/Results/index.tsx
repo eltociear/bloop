@@ -7,26 +7,16 @@ import React, {
   useState,
 } from 'react';
 import * as Sentry from '@sentry/react';
-import { useNavigate } from 'react-router-dom';
-import {
-  FullResult,
-  ResultClick,
-  ResultItemType,
-  ResultType,
-} from '../../types/results';
-import Filters from '../../components/Filters';
+import { ResultClick, ResultItemType, ResultType } from '../../types/results';
 import { SearchContext } from '../../context/searchContext';
 import { mapFiltersData } from '../../mappers/filter';
-import { mapFileResult, mapRanges, mapResults } from '../../mappers/results';
-import { FullResultModeEnum } from '../../types/general';
+import { mapResults } from '../../mappers/results';
 import { UIContext } from '../../context/uiContext';
 import useAppNavigation from '../../hooks/useAppNavigation';
-import ResultModal from '../ResultModal';
-import { useSearch } from '../../hooks/useSearch';
-import { FileSearchResponse, GeneralSearchResponse } from '../../types/api';
+import { GeneralSearchResponse } from '../../types/api';
 import ErrorFallback from '../../components/ErrorFallback';
-import { getHoverables } from '../../services/api';
 import PageHeader from '../../components/ResultsPageHeader';
+import { FileModalContext } from '../../context/fileModalContext';
 import ResultsList from './ResultsList';
 
 type Props = {
@@ -36,29 +26,16 @@ type Props = {
 
 const ResultsPage = ({ resultsData, loading }: Props) => {
   const ref = useRef<HTMLDivElement>(null);
-  const [isFiltersOpen, setIsFiltersOpen] = useState(true);
   const [totalCount, setTotalCount] = useState(1);
   const [page, setPage] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
   const [results, setResults] = useState<ResultType[]>([]);
-  const [mode, setMode] = useState<FullResultModeEnum>(
-    FullResultModeEnum.SIDEBAR,
-  );
-  const [openResult, setOpenResult] = useState<FullResult | null>(null);
-  const [scrollToLine, setScrollToLine] = useState<string | undefined>(
-    undefined,
-  );
-  const { filters, setFilters, inputValue, globalRegex, searchType } =
-    useContext(SearchContext);
-  const { setSymbolsCollapsed } = useContext(UIContext);
+  const { filters, setFilters } = useContext(SearchContext.Filters);
+  const { inputValue } = useContext(SearchContext.InputValue);
+  const { globalRegex } = useContext(SearchContext.RegexEnabled);
+  const { openFileModal } = useContext(FileModalContext);
+  const { setSymbolsCollapsed } = useContext(UIContext.Symbols);
   const { navigateSearch, navigateRepoPath } = useAppNavigation();
-  const { searchQuery: fileModalSearchQuery, data: fileResultData } =
-    useSearch<FileSearchResponse>();
-  const navigateBrowser = useNavigate();
-
-  const toggleFiltersOpen = useCallback(() => {
-    setIsFiltersOpen((prev) => !prev);
-  }, []);
 
   const onlySymbolResults = useMemo(
     () =>
@@ -72,37 +49,22 @@ const ResultsPage = ({ resultsData, loading }: Props) => {
 
   const onResultClick = useCallback<ResultClick>(
     (repo, path, lineNumber) => {
-      setScrollToLine(lineNumber ? lineNumber.join('_') : undefined);
       if (path && !(path.endsWith('/') || path.endsWith('\\'))) {
-        fileModalSearchQuery(`open:true repo:${repo} path:${path}`);
+        openFileModal(path, lineNumber ? lineNumber.join('_') : undefined);
       } else {
         navigateRepoPath(repo, path);
       }
     },
-    [fileModalSearchQuery, navigateRepoPath],
+    [navigateRepoPath, openFileModal],
   );
 
   const handlePageChange = useCallback(
     (page: number) => {
       setPage(page);
-      navigateSearch(inputValue, searchType, page);
+      navigateSearch(inputValue, page);
     },
-    [inputValue, globalRegex, searchType],
+    [inputValue, globalRegex],
   );
-
-  const handleModeChange = useCallback((m: FullResultModeEnum) => {
-    setMode(m);
-    if (m === FullResultModeEnum.SIDEBAR) {
-      setIsFiltersOpen(false);
-    }
-  }, []);
-
-  const onResultClosed = useCallback(() => {
-    if (mode === FullResultModeEnum.SIDEBAR) {
-      setIsFiltersOpen(true);
-    }
-    setOpenResult(null);
-  }, [mode]);
 
   useEffect(() => {
     setSymbolsCollapsed(onlySymbolResults);
@@ -120,62 +82,25 @@ const ResultsPage = ({ resultsData, loading }: Props) => {
     }
   }, [resultsData]);
 
-  useEffect(() => {
-    if (fileResultData) {
-      setOpenResult(mapFileResult(fileResultData.data[0]));
-      navigateBrowser({
-        search: scrollToLine
-          ? '?' +
-            new URLSearchParams({
-              scroll_line_index: scrollToLine.toString(),
-            }).toString()
-          : '',
-      });
-      getHoverables(
-        fileResultData.data[0].data.relative_path,
-        fileResultData.data[0].data.repo_ref,
-      ).then((data) => {
-        setOpenResult((prevState) => ({
-          ...prevState!,
-          hoverableRanges: mapRanges(data.ranges),
-        }));
-      });
-    }
-  }, [fileResultData]);
-
   return (
-    <>
-      <Filters isOpen={isFiltersOpen} toggleOpen={toggleFiltersOpen} />
-      <div
-        className="p-8 flex-1 overflow-x-auto mx-auto max-w-6.5xl box-content"
-        ref={ref}
-      >
-        <PageHeader
-          resultsNumber={totalCount || results.length}
-          showCollapseControls={onlySymbolResults}
-          loading={loading}
-        />
-        <ResultsList
-          results={results}
-          onResultClick={onResultClick}
-          page={page}
-          setPage={handlePageChange}
-          totalPages={totalPages}
-          loading={loading}
-        />
-      </div>
-
-      {openResult ? (
-        <ResultModal
-          result={openResult as FullResult}
-          onResultClosed={onResultClosed}
-          mode={mode}
-          setMode={handleModeChange}
-        />
-      ) : (
-        ''
-      )}
-    </>
+    <div
+      className="p-8 flex-1 overflow-x-auto mx-auto max-w-6.5xl box-content pb-44"
+      ref={ref}
+    >
+      <PageHeader
+        resultsNumber={totalCount || results.length}
+        showCollapseControls={onlySymbolResults}
+        loading={loading}
+      />
+      <ResultsList
+        results={results}
+        onResultClick={onResultClick}
+        page={page}
+        setPage={handlePageChange}
+        totalPages={totalPages}
+        loading={loading}
+      />
+    </div>
   );
 };
 export default Sentry.withErrorBoundary(ResultsPage, {

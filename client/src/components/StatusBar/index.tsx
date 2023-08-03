@@ -1,16 +1,21 @@
-import { useContext, useEffect, useState } from 'react';
+import React, { useContext, useEffect, useState } from 'react';
+import { useTranslation, Trans } from 'react-i18next';
 import Button from '../Button';
-import { DiscordLogo, PowerPlug, Thunder } from '../../icons';
-import { SearchContext } from '../../context/searchContext';
+import { DiscordLogo, Globe, Magazine, Papers, PowerPlug } from '../../icons';
 import { UIContext } from '../../context/uiContext';
 import { DeviceContext } from '../../context/deviceContext';
 import { getDiscordLink } from '../../services/api';
+import { MenuListItemType } from '../ContextMenu';
+import DropdownWithIcon from '../Dropdown/WithIcon';
+import { LocaleContext } from '../../context/localeContext';
+import LanguageSelector from '../LanguageSelector';
 import StatusItem from './StatusItem';
 
 const StatusBar = () => {
-  const { lastQueryTime } = useContext(SearchContext);
-  const { setBugReportModalOpen } = useContext(UIContext);
-  const { openLink } = useContext(DeviceContext);
+  const { t } = useTranslation();
+
+  const { setBugReportModalOpen } = useContext(UIContext.BugReport);
+  const { openLink, release } = useContext(DeviceContext);
   const [isOnline, setIsOnline] = useState(true);
   const [discordLink, setDiscordLink] = useState(
     'https://discord.com/invite/kZEgj5pyjm',
@@ -39,14 +44,15 @@ const StatusBar = () => {
 
   return (
     <div
-      className={`h-16 flex items-center justify-between gap-8 px-8 bg-gray-900 select-none
-    text-xs border-t border-gray-800 fixed bottom-0 left-0 right-0 z-30 select-none cursor-default`}
+      className={`h-16 flex items-center justify-between gap-8 px-8 bg-bg-base select-none
+    text-xs border-t border-bg-border fixed bottom-0 left-0 right-0 z-30 cursor-default`}
     >
-      <span className="flex text-gray-500 gap-4">
+      <span className="flex text-label-muted gap-4">
+        <LanguageSelector />
         <StatusItem
           icon={<PowerPlug />}
-          textMain={'Status'}
-          textSecondary={isOnline ? 'Online' : 'Offline'}
+          textMain={t(`Status`)}
+          textSecondary={isOnline ? t(`Online`) : t(`Offline`)}
           secondaryColor={isOnline ? 'ok' : 'error'}
         />
         {/*<StatusItem*/}
@@ -54,27 +60,31 @@ const StatusBar = () => {
         {/*  textMain={'Clients'}*/}
         {/*  textSecondary={'80k'}*/}
         {/*/>*/}
-        <StatusItem
-          icon={<Thunder />}
-          textMain={'Speed of last query'}
-          textSecondary={lastQueryTime + 'ms'}
-        />
       </span>
-      <span className="flex gap-3">
+      <span className="flex gap-3 items-center">
+        <p className="text-label-muted caption">v{release}</p>
+        <Button
+          size="small"
+          variant="secondary"
+          onClick={() => openLink('https://bloop.ai/docs/')}
+        >
+          <Magazine />
+          <Trans>Documentation</Trans>
+        </Button>
         <Button
           size="small"
           variant="secondary"
           onClick={() => openLink(discordLink)}
         >
           <DiscordLogo />
-          Discord
+          <Trans>Discord</Trans>
         </Button>
         <Button
           size="small"
           variant="secondary"
           onClick={() => setBugReportModalOpen(true)}
         >
-          Report a bug
+          <Trans>Report a bug</Trans>
         </Button>
       </span>
     </div>
